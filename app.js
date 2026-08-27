@@ -84,7 +84,8 @@ async function onSignedIn(){
   showSand('Preparando tu carpeta en Drive…');
   try {
     await ensureFolder();
-    await Promise.all([loadEvents(), loadProyectos(), loadHistorial(), loadCuadrante()]);
+    await loadHistorial(); // primero, para que loadCuadrante pueda fusionar sin condición de carrera
+    await Promise.all([loadEvents(), loadProyectos(), loadCuadrante()]);
     renderNameMatches();
     renderCalendar();
     renderUpcoming();
@@ -298,6 +299,7 @@ async function loadCuadrante({ forceReparse = false } = {}){
       try {
         const r = await downloadFile(cached.id);
         currentParsed = await r.json();
+        await mergeIntoHistorial(currentParsed); // por si el historial aún no lo tenía (p. ej. tras esta actualización)
         renderDigitalView(currentParsed);
         renderNameMatches();
         return;
@@ -555,7 +557,13 @@ function parseMidweek(pages){
       const rol = roleMatch ? roleMatch[1] : null;
       const nombreTexto = roleMatch ? roleMatch[2] : rightText;
       const nombres = nombreTexto.split('/').map(n => n.trim()).filter(Boolean);
-      if (parte || nombres.length) {
+
+      // Fragmento huérfano (sin hora ni parte, solo nombre): no crea una tarjeta rota,
+      // se añade como nombre extra a la última asignación real de la misma fecha.
+      const prev = asignaciones[asignaciones.length - 1];
+      if (!hora && !parte && !rol && nombres.length && prev && prev.fecha === currentRow.fecha) {
+        prev.nombres = (prev.nombres || []).concat(nombres);
+      } else if (parte || nombres.length) {
         asignaciones.push({ fecha: currentRow.fecha, lectura: currentRow.lectura, seccion: currentRow.seccion, hora, parte, rol, nombres });
       }
     }
