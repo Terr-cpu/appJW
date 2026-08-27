@@ -1,4 +1,4 @@
-  /* =========================================================
+/* =========================================================
    Hourglass Panel — configuración
    ========================================================= */
 const CONFIG = {
@@ -420,14 +420,42 @@ function normalizeText(s){
 }
 function normalizeKey(s){ return normalizeText(s).replace(/[^a-z0-9]+/g, ' ').trim(); }
 
-function splitLineByColumn(line, width, ratio = 0.6){
-  const splitX = width * ratio;
+/* Encuentra el mayor "hueco" horizontal en la página (entre el 25% y el 85% del ancho)
+   para usarlo como frontera entre la columna de "concepto" y la de "nombre/rol".
+   Es más fiable que un ratio fijo porque se adapta a cada documento. */
+function detectColumnSplit(page){
+  const xs = [];
+  page.lines.forEach(l => l.items.forEach(i => xs.push(Math.round(i.x))));
+  const uniq = [...new Set(xs)].sort((a, b) => a - b);
+  if (uniq.length < 4) return page.width * 0.6;
+  const lo = page.width * 0.25, hi = page.width * 0.85;
+  let bestGap = 0, bestSplit = page.width * 0.6;
+  for (let i = 1; i < uniq.length; i++) {
+    const mid = (uniq[i] + uniq[i - 1]) / 2;
+    if (mid < lo || mid > hi) continue;
+    const gap = uniq[i] - uniq[i - 1];
+    if (gap > bestGap) { bestGap = gap; bestSplit = mid; }
+  }
+  return bestSplit;
+}
+
+function splitLineByColumn(line, splitX){
   const leftItems = line.items.filter(i => i.x < splitX);
   const rightItems = line.items.filter(i => i.x >= splitX);
   return {
     left: leftItems.map(i => i.text).join(' ').replace(/\s+/g, ' ').trim(),
     right: rightItems.map(i => i.text).join(' ').replace(/\s+/g, ' ').trim(),
   };
+}
+
+/* Limpia artefactos típicos de fuentes con mapeo Unicode roto en el PDF de origen
+   (viñetas que se extraen como "e", "«", "+", comas en vez de puntos, etc.) */
+function cleanParteText(s){
+  return String(s || '')
+    .replace(/^[•·*+«»]\s*/, '')
+    .replace(/^([a-zA-Z])\s+(?=[A-ZÁÉÍÓÚÑ0-9¿])/, '')
+    .replace(/^(\d+)[,;]\s*/, '$1. ')
+    .trim();
 }
 
 function detectTipo(pages){
@@ -443,6 +471,7 @@ function parseMidweek(pages){
   const asignaciones = [];
   let fecha = null, lectura = null, seccion = null;
   pages.forEach(page => {
+    const splitX = detectColumnSplit(page);
     page.lines.forEach(line => {
       const t = line.text;
       const dateMatch = t.match(/^(\d{4}\/\d{2}\/\d{2})\s*\|\s*(.+)$/);
@@ -451,19 +480,25 @@ function parseMidweek(pages){
       if (/^sala auxiliar/i.test(t) || /^auditorio principal/i.test(t) || /^impreso/i.test(t)) return;
       if (!fecha) return;
 
-      const { left, right } = splitLineByColumn(line, page.width);
+      const { left, right } = splitLineByColumn(line, splitX);
       if (!left && !right) return;
 
-      const timeMatch = left.match(/^(\d{1,2}:\d{2})\s*[•·]?\s*(.*)$/);
+      const timeMatch = left.match(/^(\d{1,2}:\d{2})\s*(.*)$/);
       const hora = timeMatch ? timeMatch[1] : null;
-      const parte = (timeMatch ? timeMatch[2] : left).replace(/^[•·]\s*/, '').trim();
-      if (!right) {
+      let parte = cleanParteText(timeMatch ? timeMatch[2] : left);
+
+      // A veces la duración "(NN min.)" cae justo al otro lado de la frontera de columna
+      let rightText = right;
+      const durMatch = rightText.match(/^\((\d+\s*min\.?)\)\s*/i);
+      if (durMatch) { parte = `${parte} (${durMatch[1]})`.trim(); rightText = rightText.slice(durMatch[0].length).trim(); }
+
+      if (!rightText) {
         if (parte) asignaciones.push({ fecha, lectura, seccion, hora, parte, rol: null, nombres: [] });
         return;
       }
-      const roleMatch = right.match(/^(Oraci[oó]n|Presidente|Conductor|Lector|Consejero de la sala auxiliar)\s+(.*)$/i);
+      const roleMatch = rightText.match(/^(Oraci[oó]n|Presidente|Conductor|Lector|Consejero de la sala auxiliar)\s+(.*)$/i);
       const rol = roleMatch ? roleMatch[1] : null;
-      const nombreTexto = roleMatch ? roleMatch[2] : right;
+      const nombreTexto = roleMatch ? roleMatch[2] : rightText;
       const nombres = nombreTexto.split('/').map(n => n.trim()).filter(Boolean);
       if (parte || nombres.length) asignaciones.push({ fecha, lectura, seccion, hora, parte, rol, nombres });
     });
@@ -497,25 +532,28 @@ function extractFieldsByAnchors(text, defs){
   return result;
 }
 
+/* Importante: aquí NO se agrupa línea a línea. Se reparte cada palabra de todo el bloque
+   (una fecha hasta la siguiente) en dos bolsas —izquierda/derecha— según su columna, y
+   SOLO DESPUÉS se reconstruyen las líneas de cada bolsa por separado. Así, aunque dos filas
+   estén muy pegadas verticalmente, nunca se mezclan palabras de una columna con la otra. */
 function parsePublica(pages){
   const blocks = [];
   let current = null;
   pages.forEach(page => {
+    const splitX = detectColumnSplit(page);
     page.lines.forEach(line => {
       const t = line.text;
       const dateMatch = t.match(/^(\d{1,2}\s+[A-ZÁÉÍÓÚÑ]+\s+\d{4})$/);
-      if (dateMatch) { current = { fecha: dateMatch[1], leftLines: [], rightLines: [] }; blocks.push(current); return; }
+      if (dateMatch) { current = { fecha: dateMatch[1], leftItems: [], rightItems: [] }; blocks.push(current); return; }
       if (!current) return;
-      const { left, right } = splitLineByColumn(line, page.width, 0.5);
-      if (left) current.leftLines.push(left);
-      if (right) current.rightLines.push(right);
+      line.items.forEach(it => (it.x < splitX ? current.leftItems : current.rightItems).push(it));
     });
   });
 
   return blocks
     .map(b => {
-      const leftText = b.leftLines.join(' ');
-      const rightText = b.rightLines.join(' ');
+      const leftText = clusterItemsIntoLines(b.leftItems, 4).map(l => l.text).join(' ');
+      const rightText = clusterItemsIntoLines(b.rightItems, 4).map(l => l.text).join(' ');
       if (/ASAMBLEA/i.test(leftText + ' ' + rightText)) return { fecha: b.fecha, asamblea: true };
       return { fecha: b.fecha, ...extractFieldsByAnchors(leftText, PUBLIC_LEFT_DEFS), ...extractFieldsByAnchors(rightText, PUBLIC_RIGHT_DEFS) };
     })
@@ -562,12 +600,7 @@ function renderDigitalView(parsed){
     box.innerHTML = porFecha.map(g => `
       <div class="digital-week">
         <h3>${escapeHtml(g.fecha)}${g.lectura ? ` · ${escapeHtml(g.lectura)}` : ''}</h3>
-        ${g.filas.map(f => `
-          <div class="digital-row">
-            <span class="dr-hora">${f.hora ? escapeHtml(f.hora) : ''}</span>
-            <span class="dr-parte">${escapeHtml(f.parte || '')}</span>
-            <span class="dr-nombre">${f.rol ? `<em>${escapeHtml(f.rol)}</em> ` : ''}${escapeHtml((f.nombres || []).join(' / '))}</span>
-          </div>`).join('')}
+        ${renderMidweekRows(g.filas)}
       </div>`).join('');
     return;
   }
@@ -589,6 +622,34 @@ function renderDigitalView(parsed){
   }
 
   box.innerHTML = '';
+}
+
+const SECTION_STYLE = {
+  'tesoros de la biblia': { color: '#2F6F62', bg: '#EAF2EF' },
+  'seamos mejores maestros': { color: '#9B7623', bg: '#FBF3DC' },
+  'nuestra vida cristiana': { color: '#B4432D', bg: '#FBEAE5' },
+  'vivamos como cristianos': { color: '#B4432D', bg: '#FBEAE5' },
+};
+
+function renderMidweekRows(filas){
+  let html = '';
+  let lastSeccion; // undefined ≠ null: fuerza a pintar el primer grupo, incluso si es "sin sección"
+  filas.forEach(f => {
+    if (f.seccion !== lastSeccion) {
+      lastSeccion = f.seccion;
+      if (f.seccion) {
+        const style = SECTION_STYLE[normalizeKey(f.seccion)] || { color: 'var(--ink-soft)', bg: 'var(--paper)' };
+        html += `<div class="dv-section" style="color:${style.color}; background:${style.bg}; border-color:${style.color}">${escapeHtml(f.seccion)}</div>`;
+      }
+    }
+    html += `
+      <div class="digital-row">
+        <span class="dr-hora">${f.hora ? escapeHtml(f.hora) : ''}</span>
+        <span class="dr-parte">${escapeHtml(f.parte || '')}</span>
+        <span class="dr-nombre">${f.rol ? `<em>${escapeHtml(f.rol)}</em>` : ''}${escapeHtml((f.nombres || []).join(' / '))}</span>
+      </div>`;
+  });
+  return html;
 }
 
 /* ---------- Localizar mi nombre a partir de los datos digitalizados ---------- */
