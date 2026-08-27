@@ -3,7 +3,7 @@
    ========================================================= */
 const CONFIG = {
   // Sustituye por tu Client ID de Google Cloud Console (OAuth 2.0 → Web application)
-  CLIENT_ID: 'TU_CLIENT_ID.apps.googleusercontent.com',
+  CLIENT_ID: '989709837307-449de0hk767r7lplvjfc4ilfb6smnpfd.apps.googleusercontent.com',
   SCOPES: 'https://www.googleapis.com/auth/drive.file',
   FOLDER_NAME: 'Hourglass Panel',
   CUADRANTE_NAME: 'cuadrante-actual.pdf',
