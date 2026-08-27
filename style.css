@@ -142,6 +142,11 @@ main{max-width:720px; margin:0 auto; padding:20px 20px 60px;}
 .dr-parte{flex:1 1 55%; color:var(--ink);}
 .dr-nombre{flex:1 1 35%; text-align:right; color:var(--teal); font-weight:600;}
 .dr-nombre em{color:var(--ink-soft); font-style:normal; font-weight:400; font-size:.75rem; display:block;}
+.dv-section{
+  font-family:var(--font-mono); font-size:.68rem; font-weight:700; letter-spacing:.04em;
+  text-transform:uppercase; padding:5px 10px; margin:10px -4px 4px; border-radius:6px;
+  border-left:3px solid; display:inline-block;
+}
 
 /* ---------- Calendar ---------- */
 .cal-nav{display:flex; align-items:center; justify-content:center; gap:16px; margin-bottom:10px;}
