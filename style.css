@@ -140,6 +140,10 @@ main{max-width:720px; margin:0 auto; padding:20px 20px 60px;}
 .digital-row:first-of-type{border-top:none;}
 .dr-hora{font-family:var(--font-mono); font-size:.72rem; color:var(--sand-dark); min-width:40px;}
 .dr-parte{flex:1 1 55%; color:var(--ink);}
+.dr-cat{
+  display:block; font-family:var(--font-mono); font-size:.65rem; font-weight:600;
+  color:var(--ink-soft); text-transform:uppercase; letter-spacing:.03em; margin-bottom:1px;
+}
 .dr-nombre{flex:1 1 35%; text-align:right; color:var(--teal); font-weight:600;}
 .dr-nombre em{color:var(--ink-soft); font-style:normal; font-weight:400; font-size:.75rem; display:block;}
 .dv-section{
