@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Hourglass · Panel</title>
+<meta name="theme-color" content="#1E2A38">
+<link rel="manifest" href="manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="sandOverlay" class="sand-overlay" hidden>
+  <div class="hourglass-loader" aria-hidden="true">
+    <svg viewBox="0 0 40 64"><path d="M4 2h32v10c0 8-14 12-14 20s14 12 14 20v10H4V52c0-8 14-12 14-20S4 20 4 12V2z" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/></svg>
+  </div>
+  <p id="sandOverlayText">Sincronizando con Drive…</p>
+</div>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="brand-mark" viewBox="0 0 40 64" aria-hidden="true"><path d="M4 2h32v10c0 8-14 12-14 20s14 12 14 20v10H4V52c0-8 14-12 14-20S4 20 4 12V2z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/></svg>
+    <div>
+      <h1>Hourglass</h1>
+      <p class="brand-sub">Panel de la congregación</p>
+    </div>
+  </div>
+  <div class="account" id="accountArea">
+    <button id="signInBtn" class="btn btn-primary">Entrar con Google</button>
+    <div id="signedInInfo" class="signed-in" hidden>
+      <img id="userAvatar" alt="" class="avatar">
+      <span id="userName"></span>
+      <button id="signOutBtn" class="btn btn-ghost">Salir</button>
+    </div>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs" hidden>
+  <button class="tab active" data-tab="cuadrante">Cuadrante</button>
+  <button class="tab" data-tab="calendario">Calendario</button>
+  <button class="tab" data-tab="proyectos">Proyectos</button>
+</nav>
+
+<main id="app" hidden>
+
+  <section id="tab-cuadrante" class="panel active">
+    <div class="panel-head">
+      <h2>Cuadrante de asignaciones</h2>
+      <label class="btn btn-primary file-btn">
+        Subir PDF
+        <input type="file" id="pdfInput" accept="application/pdf" hidden>
+      </label>
+    </div>
+    <div id="cuadranteMeta" class="meta-line"></div>
+
+    <div class="name-search">
+      <label for="myNameInput">Mi nombre (para localizarte en el PDF)</label>
+      <input type="text" id="myNameInput" placeholder="p. ej. Juan Martín">
+    </div>
+    <div id="nameMatches" class="name-matches"></div>
+
+    <div id="cuadranteViewer" class="pdf-viewer empty">
+      <p>Todavía no hay ningún cuadrante subido.</p>
+    </div>
+  </section>
+
+  <section id="tab-calendario" class="panel">
+    <div class="panel-head">
+      <h2>Calendario</h2>
+      <button id="addEventBtn" class="btn btn-primary">+ Añadir</button>
+    </div>
+    <div class="cal-nav">
+      <button id="prevMonth" class="btn btn-ghost" aria-label="Mes anterior">‹</button>
+      <span id="calLabel" class="cal-label"></span>
+      <button id="nextMonth" class="btn btn-ghost" aria-label="Mes siguiente">›</button>
+    </div>
+    <div id="calGrid" class="cal-grid"></div>
+    <div class="upcoming">
+      <h3>Próximo</h3>
+      <ul id="upcomingList" class="upcoming-list"></ul>
+    </div>
+  </section>
+
+  <section id="tab-proyectos" class="panel">
+    <div class="panel-head">
+      <h2>Proyectos de reunión</h2>
+      <button id="addProyectoBtn" class="btn btn-primary">+ Nuevo</button>
+    </div>
+    <div id="proyectosList" class="proyectos-list"></div>
+  </section>
+
+</main>
+
+<div id="modalRoot"></div>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
