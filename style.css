@@ -114,6 +114,35 @@ main{max-width:720px; margin:0 auto; padding:20px 20px 60px;}
 .nm-detalle{font-size:.83rem; line-height:1.4; color:var(--ink-soft);}
 .nm-detalle mark{background:#F3D983; color:var(--ink); padding:0 2px; border-radius:3px;}
 
+/* ---------- Toggle vista digital / original ---------- */
+.view-toggle{display:flex; gap:6px; margin-bottom:12px;}
+.vt-btn{
+  font-family:var(--font-body); font-size:.78rem; font-weight:600;
+  padding:7px 14px; border-radius:999px; border:1.5px solid var(--line);
+  background:var(--surface); color:var(--ink-soft); cursor:pointer;
+}
+.vt-btn.active{background:var(--ink); color:var(--paper); border-color:var(--ink);}
+
+/* ---------- Vista digitalizada del cuadrante ---------- */
+.digital-view{display:flex; flex-direction:column; gap:14px; margin-bottom:16px;}
+.digital-week{
+  background:var(--surface); border:1px solid var(--line); border-radius:var(--radius);
+  padding:14px 16px; box-shadow:var(--shadow);
+}
+.digital-week h3{
+  font-size:.95rem; margin-bottom:10px; padding-bottom:8px; border-bottom:1px solid var(--line);
+  color:var(--teal);
+}
+.digital-row{
+  display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 8px;
+  padding:6px 0; border-top:1px dashed var(--line); font-size:.85rem;
+}
+.digital-row:first-of-type{border-top:none;}
+.dr-hora{font-family:var(--font-mono); font-size:.72rem; color:var(--sand-dark); min-width:40px;}
+.dr-parte{flex:1 1 55%; color:var(--ink);}
+.dr-nombre{flex:1 1 35%; text-align:right; color:var(--teal); font-weight:600;}
+.dr-nombre em{color:var(--ink-soft); font-style:normal; font-weight:400; font-size:.75rem; display:block;}
+
 /* ---------- Calendar ---------- */
 .cal-nav{display:flex; align-items:center; justify-content:center; gap:16px; margin-bottom:10px;}
 .cal-label{font-family:var(--font-display); font-weight:600; font-size:1.05rem; min-width:170px; text-align:center;}
