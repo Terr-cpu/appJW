@@ -8,6 +8,7 @@ const CONFIG = {
   FOLDER_NAME: 'Hourglass Panel',
   CUADRANTE_PREFIX: 'cuadrante-actual',
   ASIGNACIONES_NAME: 'asignaciones.json',
+  HISTORIAL_NAME: 'historial-asignaciones.json',
   EVENTS_NAME: 'eventos.json',
   PROYECTOS_NAME: 'proyectos.json',
 };
@@ -83,7 +84,8 @@ async function onSignedIn(){
   showSand('Preparando tu carpeta en Drive…');
   try {
     await ensureFolder();
-    await Promise.all([loadEvents(), loadProyectos(), loadCuadrante()]);
+    await Promise.all([loadEvents(), loadProyectos(), loadHistorial(), loadCuadrante()]);
+    renderNameMatches();
     renderCalendar();
     renderUpcoming();
     renderProyectos();
@@ -316,6 +318,7 @@ async function analyzeCuadrante(blob, mime){
         });
     currentParsed = parseCuadrante(pages);
     await saveFile(CONFIG.ASIGNACIONES_NAME, 'application/json', JSON.stringify(currentParsed, null, 2), folderId);
+    await mergeIntoHistorial(currentParsed);
   } catch (err) {
     console.error(err);
     currentParsed = { tipo: 'desconocido', asignaciones: [], error: true };
@@ -325,6 +328,36 @@ async function analyzeCuadrante(blob, mime){
   }
   renderDigitalView(currentParsed);
   renderNameMatches();
+}
+
+/* ---------- Historial de asignaciones (persiste aunque se reemplace el cuadrante) ---------- */
+let currentHistorial = [];
+
+async function loadHistorial(){
+  const f = await findFile(CONFIG.HISTORIAL_NAME, folderId, 'application/json');
+  if (!f) { currentHistorial = []; return; }
+  try {
+    const r = await downloadFile(f.id);
+    currentHistorial = await r.json();
+  } catch (e) { currentHistorial = []; }
+}
+
+function assignmentKey(a){
+  if (a.tipo === 'entre-semana') return ['mw', a.fecha, a.parte, a.rol, (a.nombres || []).join('/')].join('|');
+  return ['pub', a.fecha, a.discursante || '', a.presidente || '', a.asamblea ? 'asamblea' : ''].join('|');
+}
+
+async function mergeIntoHistorial(parsed){
+  const seen = new Set(currentHistorial.map(assignmentKey));
+  let added = 0;
+  (parsed.asignaciones || []).forEach(a => {
+    const record = { tipo: parsed.tipo, ...a };
+    const key = assignmentKey(record);
+    if (!seen.has(key)) { seen.add(key); currentHistorial.push(record); added++; }
+  });
+  if (added > 0) {
+    await saveFile(CONFIG.HISTORIAL_NAME, 'application/json', JSON.stringify(currentHistorial, null, 2), folderId);
+  }
 }
 
 /* ---------- Alternar vista digital / documento original ---------- */
@@ -475,10 +508,35 @@ const MIDWEEK_SECTIONS = ['tesoros de la biblia', 'seamos mejores maestros', 'nu
    repartan en varias líneas por ser largos) se acumula y se cierra solo cuando llega la
    siguiente hora, sección o fecha. Así los nombres largos partidos en dos líneas no se
    convierten en "asignaciones fantasma" sueltas. */
+/* Compara dos textos por solapamiento de palabras; sirve para detectar líneas casi
+   duplicadas que el OCR a veces genera al leer dos veces el mismo trozo de una foto. */
+function isNearDuplicate(a, b){
+  if (!a || !b) return false;
+  const wa = normalizeText(a).split(/\s+/).filter(Boolean);
+  const wb = normalizeText(b).split(/\s+/).filter(Boolean);
+  if (!wa.length || !wb.length) return false;
+  const setA = new Set(wa);
+  const common = wb.filter(w => setA.has(w)).length;
+  return common / Math.max(wa.length, wb.length) > 0.6;
+}
+
+/* Igual que en "publica": no se procesa línea a línea de forma aislada. Cada FILA LÓGICA
+   (todo lo que cuelga de una misma hora, aunque el título de la parte o el nombre se
+   repartan en varias líneas por ser largos) se acumula y se cierra solo cuando llega la
+   siguiente hora, sección o fecha. Así los nombres largos partidos en dos líneas no se
+   convierten en "asignaciones fantasma" sueltas. Además, una hora solo se acepta como
+   inicio de fila nueva si es igual o posterior a la última vista en la misma fecha —
+   esto filtra números sueltos que el PDF/OCR confunde con una hora real. */
 function parseMidweek(pages){
   const asignaciones = [];
   let fecha = null, lectura = null, seccion = null;
   let currentRow = null;
+  let lastMinutes = null;
+
+  function toMinutes(hhmm){
+    const m = hhmm.match(/^(\d{1,2}):(\d{2})$/);
+    return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+  }
 
   function flushRow(){
     if (!currentRow) return;
@@ -509,19 +567,24 @@ function parseMidweek(pages){
     page.lines.forEach(line => {
       const t = line.text;
       const dateMatch = t.match(/^(\d{4}\/\d{2}\/\d{2})\s*\|\s*(.+)$/);
-      if (dateMatch) { flushRow(); fecha = dateMatch[1]; lectura = dateMatch[2].trim(); seccion = null; return; }
+      if (dateMatch) { flushRow(); fecha = dateMatch[1]; lectura = dateMatch[2].trim(); seccion = null; lastMinutes = null; return; }
       if (MIDWEEK_SECTIONS.includes(normalizeKey(t))) { flushRow(); seccion = t.trim(); return; }
-      if (/^sala auxiliar/i.test(t) || /^auditorio principal/i.test(t) || /^impreso/i.test(t)) return;
+      if (/sala auxiliar/i.test(t) || /auditorio principal/i.test(t) || /^impreso/i.test(t)) return;
       if (!fecha) return;
 
       const { left, right } = splitLineByColumn(line, splitX);
       if (!left && !right) return;
 
       const timeMatch = left.match(/^(\d{1,2}:\d{2})\s*(.*)$/);
+      const timeMinutes = timeMatch ? toMinutes(timeMatch[1]) : null;
+      // Solo se acepta como hora real si es igual o posterior a la última vista en esta fecha;
+      // si no, es un artefacto de lectura (PDF con fuente rota u OCR) y se trata como continuación.
+      const isRealTime = timeMatch && (lastMinutes === null || timeMinutes >= lastMinutes);
       const rightStartsRole = /^(Oraci[oó]n|Presidente|Conductor|Lector|Consejero de la sala auxiliar)\b/i.test(right);
 
-      if (timeMatch) {
+      if (isRealTime) {
         flushRow();
+        lastMinutes = timeMinutes;
         currentRow = { fecha, lectura, seccion, hora: timeMatch[1], leftParts: [timeMatch[2]], rightParts: [right] };
       } else if (currentRow && rightStartsRole && currentRow.rightParts.some(p => p)) {
         // Segundo rol para la MISMA parte (p. ej. "Conductor" + "Lector" en el estudio bíblico):
@@ -530,9 +593,13 @@ function parseMidweek(pages){
         flushRow();
         currentRow = { fecha: f2, lectura: l2, seccion: s2, hora: h2, leftParts: lp2.slice(), rightParts: [right] };
       } else if (currentRow) {
-        // continuación (línea envuelta) de la fila abierta: se añade a lo que ya había
-        if (left) currentRow.leftParts.push(left);
-        if (right) currentRow.rightParts.push(right);
+        // continuación (línea envuelta, o falsa hora descartada) de la fila abierta
+        if (left && !isNearDuplicate(left, currentRow.leftParts[currentRow.leftParts.length - 1])) {
+          currentRow.leftParts.push(left);
+        }
+        if (right && !isNearDuplicate(right, currentRow.rightParts[currentRow.rightParts.length - 1])) {
+          currentRow.rightParts.push(right);
+        }
       } else {
         // línea suelta sin hora todavía al principio de la fecha/sección
         currentRow = { fecha, lectura, seccion, hora: null, leftParts: [left], rightParts: [right] };
@@ -682,14 +749,39 @@ function renderMidweekRows(filas){
     html += `
       <div class="digital-row">
         <span class="dr-hora">${f.hora ? escapeHtml(f.hora) : ''}</span>
-        <span class="dr-parte">${escapeHtml(f.parte || '')}</span>
+        <span class="dr-parte"><span class="dr-cat">${escapeHtml(categorizeMidweekRow(f))}</span>${escapeHtml(f.parte || '')}</span>
         <span class="dr-nombre">${f.rol ? `<em>${escapeHtml(f.rol)}</em>` : ''}${escapeHtml((f.nombres || []).join(' / '))}</span>
       </div>`;
   });
   return html;
 }
 
-/* ---------- Localizar mi nombre a partir de los datos digitalizados ---------- */
+/* Traduce cada asignación a la categoría fija del programa a la que pertenece
+   (Oración, Presidencia, Tesoros de la Biblia, Perlas escondidas, Asignación estudiantil,
+   Nuestra Vida Cristiana, Estudio bíblico...) en vez de depender del título variable. */
+function categorizeMidweekRow(a){
+  if (a.rol) {
+    if (/oraci/i.test(a.rol)) return a.seccion ? 'Oración final' : 'Oración inicial';
+    if (/presidente/i.test(a.rol)) return 'Presidencia';
+    if (/conductor/i.test(a.rol)) return 'Conductor del estudio';
+    if (/lector/i.test(a.rol)) return 'Lector del estudio';
+    return a.rol;
+  }
+  const seccionKey = a.seccion ? normalizeKey(a.seccion) : null;
+  if (seccionKey === 'tesoros de la biblia') {
+    if (/lectura de la biblia/i.test(a.parte || '')) return 'Lectura de la Biblia';
+    if (/perlas escondidas/i.test(a.parte || '')) return 'Perlas escondidas';
+    return 'Tesoros de la Biblia';
+  }
+  if (seccionKey === 'seamos mejores maestros') return 'Asignación estudiantil';
+  if (seccionKey === 'nuestra vida cristiana' || seccionKey === 'vivamos como cristianos') {
+    if (/estudio b[ií]blico/i.test(a.parte || '')) return 'Estudio bíblico';
+    return 'Nuestra Vida Cristiana';
+  }
+  return a.parte || 'Asignación';
+}
+
+/* ---------- Localizar mi nombre en el historial registrado (no depende del documento actual) ---------- */
 const nameInput = $('#myNameInput');
 nameInput.value = localStorage.getItem('hg_myname') || '';
 nameInput.addEventListener('change', () => {
@@ -697,39 +789,30 @@ nameInput.addEventListener('change', () => {
   renderNameMatches();
 });
 
-function findMyAssignments(parsed, name){
-  if (!parsed || !name) return [];
+function findMyAssignments(historial, name){
+  if (!historial || !name) return [];
   const target = normalizeText(name);
   const out = [];
 
-  if (parsed.tipo === 'entre-semana') {
-    parsed.asignaciones.forEach(a => {
+  historial.forEach(a => {
+    if (a.tipo === 'entre-semana') {
       const nombres = a.nombres || [];
       if (nombres.some(n => normalizeText(n).includes(target))) {
-        out.push({
-          fecha: a.fecha,
-          etiqueta: a.hora || '',
-          // Si es un rol (Oración/Presidente/Conductor/Lector), lo que "tienes" es el rol,
-          // no el título de la canción o parte a la que va pegado en el documento.
-          detalle: a.rol || a.parte || '',
-          nombreTexto: nombres.join(' / '),
-        });
+        out.push({ fecha: a.fecha, hora: a.hora || '', categoria: categorizeMidweekRow(a), nombreTexto: nombres.join(' / ') });
       }
-    });
-  } else if (parsed.tipo === 'publica') {
-    parsed.asignaciones.forEach(a => {
+    } else if (a.tipo === 'publica') {
       if (a.asamblea) return;
-      const roles = [
-        ['discursante', 'Discursante'], ['presidente', 'Presidente'],
-        ['lectorAtalaya', 'Lector de La Atalaya'], ['oracionConclusion', 'Oración de conclusión'],
+      const campos = [
+        ['discursante', 'Discurso público'], ['presidente', 'Presidencia'],
+        ['lectorAtalaya', 'Lectura de La Atalaya'], ['oracionConclusion', 'Oración de conclusión'],
       ];
-      roles.forEach(([key, label]) => {
+      campos.forEach(([key, label]) => {
         if (a[key] && normalizeText(a[key]).includes(target)) {
-          out.push({ fecha: a.fecha, etiqueta: label, detalle: a.tema || '', nombreTexto: a[key] });
+          out.push({ fecha: a.fecha, hora: '', categoria: label, nombreTexto: a[key] });
         }
       });
-    });
-  }
+    }
+  });
   return out;
 }
 
@@ -737,12 +820,12 @@ function renderNameMatches(){
   const box = $('#nameMatches');
   const name = nameInput.value.trim();
 
-  if (!currentParsed || !currentParsed.asignaciones || currentParsed.asignaciones.length === 0) { box.innerHTML = ''; return; }
-  if (!name) { box.innerHTML = '<p class="nm-status">Añade tu nombre arriba para ver aquí tus asignaciones, sin abrir el documento.</p>'; return; }
+  if (!currentHistorial || currentHistorial.length === 0) { box.innerHTML = ''; return; }
+  if (!name) { box.innerHTML = '<p class="nm-status">Añade tu nombre arriba para ver aquí tus asignaciones registradas, aunque cambies de cuadrante.</p>'; return; }
 
-  const matches = findMyAssignments(currentParsed, name);
+  const matches = findMyAssignments(currentHistorial, name);
   if (matches.length === 0) {
-    box.innerHTML = `<p class="nm-status">No aparece "${escapeHtml(name)}" en este cuadrante.</p>`;
+    box.innerHTML = `<p class="nm-status">No hay asignaciones registradas para "${escapeHtml(name)}" todavía.</p>`;
     return;
   }
   box.innerHTML = `
@@ -750,10 +833,10 @@ function renderNameMatches(){
     <ul class="nm-cards">${matches.map(m => `
       <li>
         <div class="nm-top">
-          <span class="nm-fecha">${escapeHtml(m.fecha)}</span>
-          ${m.etiqueta ? `<span class="nm-pagesmall">${escapeHtml(m.etiqueta)}</span>` : ''}
+          <span class="nm-fecha">${escapeHtml(m.categoria)}</span>
+          <span class="nm-pagesmall">${escapeHtml(m.fecha)}${m.hora ? ' · ' + escapeHtml(m.hora) : ''}</span>
         </div>
-        <div class="nm-detalle">${m.detalle ? escapeHtml(m.detalle) + ' — ' : ''}${highlightName(m.nombreTexto, name)}</div>
+        <div class="nm-detalle">${highlightName(m.nombreTexto, name)}</div>
       </li>`).join('')}</ul>`;
 }
 
