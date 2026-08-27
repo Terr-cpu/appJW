@@ -1,4 +1,3 @@
-
   /* =========================================================
    Hourglass Panel — configuración
    ========================================================= */
@@ -7,7 +6,8 @@ const CONFIG = {
   CLIENT_ID: '989709837307-449de0hk767r7lplvjfc4ilfb6smnpfd.apps.googleusercontent.com',
   SCOPES: 'https://www.googleapis.com/auth/drive.file',
   FOLDER_NAME: 'Hourglass Panel',
-  CUADRANTE_NAME: 'cuadrante-actual.pdf',
+  CUADRANTE_PREFIX: 'cuadrante-actual',
+  ASIGNACIONES_NAME: 'asignaciones.json',
   EVENTS_NAME: 'eventos.json',
   PROYECTOS_NAME: 'proyectos.json',
 };
@@ -91,7 +91,7 @@ async function onSignedIn(){
     setInterval(checkReminders, 60000);
   } catch (err) {
     console.error(err);
-    alert('Hubo un problema conectando con Drive. Vuelve a intentar el inicio de sesión.');
+    showError('Hubo un problema conectando con Drive. Vuelve a intentar el inicio de sesión.');
   } finally {
     hideSand();
   }
@@ -117,6 +117,20 @@ function showSand(text){
 }
 function hideSand(){ $('#sandOverlay').hidden = true; }
 
+function showError(msg){
+  let banner = document.getElementById('errorBanner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'errorBanner';
+    banner.className = 'error-banner';
+    document.body.prepend(banner);
+  }
+  banner.innerHTML = `<span>${escapeHtml(msg)}</span><button aria-label="Cerrar">✕</button>`;
+  banner.querySelector('button').addEventListener('click', () => banner.remove());
+  clearTimeout(banner._hideTimer);
+  banner._hideTimer = setTimeout(() => banner.remove(), 8000);
+}
+
 $$('.tab').forEach(tab => {
   tab.addEventListener('click', () => {
     $$('.tab').forEach(t => t.classList.remove('active'));
@@ -130,10 +144,21 @@ $$('.tab').forEach(tab => {
    Drive — utilidades genéricas
    ========================================================= */
 async function driveFetch(url, options = {}){
-  const res = await fetch(url, {
-    ...options,
-    headers: { ...(options.headers || {}), Authorization: `Bearer ${accessToken}` },
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+  let res;
+  try {
+    res = await fetch(url, {
+      ...options,
+      headers: { ...(options.headers || {}), Authorization: `Bearer ${accessToken}` },
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error('Tiempo de espera agotado hablando con Drive.');
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`Drive API ${res.status}: ${text}`);
@@ -149,6 +174,19 @@ async function findFile(name, parentId, mimeType){
   );
   const data = await res.json();
   return data.files && data.files[0] ? data.files[0] : null;
+}
+
+async function findFilesByPrefix(prefix, parentId){
+  const q = `name contains '${prefix.replace(/'/g, "\\'")}' and '${parentId}' in parents and trashed=false`;
+  const res = await driveFetch(
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,mimeType,modifiedTime)&spaces=drive&orderBy=modifiedTime desc`
+  );
+  const data = await res.json();
+  return data.files || [];
+}
+
+async function deleteFile(fileId){
+  await driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, { method: 'DELETE' });
 }
 
 async function createFileMeta(name, parentId, mimeType){
@@ -189,88 +227,311 @@ async function ensureFolder(){
 }
 
 /* =========================================================
-   Cuadrante (PDF)
+   Cuadrante — subida (PDF o imagen)
    ========================================================= */
 $('#pdfInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
+  const isImage = file.type.startsWith('image/');
+  const isPdf = file.type === 'application/pdf';
+  if (!isImage && !isPdf) { showError('Sube un PDF o una imagen (JPG, PNG…).'); e.target.value = ''; return; }
+
   showSand('Subiendo cuadrante…');
   try {
-    await saveFile(CONFIG.CUADRANTE_NAME, 'application/pdf', file, folderId);
-    await loadCuadrante();
+    const ext = isPdf ? 'pdf' : (file.name.split('.').pop() || 'jpg').toLowerCase();
+    const mime = isPdf ? 'application/pdf' : file.type;
+
+    // Borra cualquier cuadrante anterior (puede tener otra extensión si antes era PDF/imagen distinta)
+    const old = await findFilesByPrefix(CONFIG.CUADRANTE_PREFIX, folderId);
+    for (const f of old) await deleteFile(f.id);
+
+    await saveFile(`${CONFIG.CUADRANTE_PREFIX}.${ext}`, mime, file, folderId);
+    await loadCuadrante({ forceReparse: true });
   } catch (err) {
     console.error(err);
-    alert('No se pudo subir el PDF.');
+    showError('No se pudo subir el archivo.');
   } finally {
     hideSand();
     e.target.value = '';
   }
 });
 
-let currentPdfBlob = null;
-let currentPdfUrl = null;
+let currentDocBlob = null;
+let currentDocUrl = null;
+let currentDocMime = null;
+let currentParsed = null; // { tipo, asignaciones: [...] }
 
-async function loadCuadrante(){
-  const f = await findFile(CONFIG.CUADRANTE_NAME, folderId, 'application/pdf');
-  const viewer = $('#cuadranteViewer');
+async function loadCuadrante({ forceReparse = false } = {}){
+  const files = await findFilesByPrefix(CONFIG.CUADRANTE_PREFIX, folderId);
+  const f = files[0] || null;
   const meta = $('#cuadranteMeta');
+  const toggle = $('#viewToggle');
+
   if (!f) {
-    viewer.classList.add('empty');
-    viewer.innerHTML = '<p>Todavía no hay ningún cuadrante subido.</p>';
+    currentDocBlob = null; currentParsed = null;
+    toggle.hidden = true;
+    setOriginalViewerEmpty();
+    $('#digitalView').innerHTML = '';
     meta.textContent = '';
-    currentPdfBlob = null;
     renderNameMatches();
     return;
   }
+
   const res = await downloadFile(f.id);
   const blob = await res.blob();
-  currentPdfBlob = blob;
-  currentPdfUrl = URL.createObjectURL(blob);
-  viewer.classList.remove('empty');
-  viewer.innerHTML = `<embed id="pdfEmbed" src="${currentPdfUrl}" type="application/pdf">`;
+  currentDocBlob = blob;
+  currentDocMime = f.mimeType;
+  currentDocUrl = URL.createObjectURL(blob);
+  renderOriginalViewer(currentDocMime, currentDocUrl);
+
   const d = new Date(f.modifiedTime);
   meta.textContent = `Subido el ${d.toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' })}`;
+
+  toggle.hidden = false;
+
+  // Reutiliza el análisis ya guardado si el archivo no ha cambiado
+  if (!forceReparse) {
+    const cached = await findFile(CONFIG.ASIGNACIONES_NAME, folderId, 'application/json');
+    if (cached) {
+      try {
+        const r = await downloadFile(cached.id);
+        currentParsed = await r.json();
+        renderDigitalView(currentParsed);
+        renderNameMatches();
+        return;
+      } catch (e) { /* si falla, se reanaliza abajo */ }
+    }
+  }
+
+  await analyzeCuadrante(blob, f.mimeType);
+}
+
+async function analyzeCuadrante(blob, mime){
+  showSand(mime === 'application/pdf' ? 'Leyendo el PDF…' : 'Reconociendo el texto de la imagen (OCR)…');
+  try {
+    const pages = mime === 'application/pdf'
+      ? await extractPagesFromPdf(blob)
+      : await extractPagesFromImage(blob, (m) => {
+          if (m.status === 'recognizing text') showSand(`Reconociendo texto… ${Math.round((m.progress || 0) * 100)}%`);
+        });
+    currentParsed = parseCuadrante(pages);
+    await saveFile(CONFIG.ASIGNACIONES_NAME, 'application/json', JSON.stringify(currentParsed, null, 2), folderId);
+  } catch (err) {
+    console.error(err);
+    currentParsed = { tipo: 'desconocido', asignaciones: [], error: true };
+    showError('No se pudo digitalizar el documento; puedes seguir consultando el original.');
+  } finally {
+    hideSand();
+  }
+  renderDigitalView(currentParsed);
   renderNameMatches();
+}
+
+/* ---------- Alternar vista digital / documento original ---------- */
+$$('#viewToggle .vt-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    $$('#viewToggle .vt-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const digital = btn.dataset.view === 'digital';
+    $('#digitalView').hidden = !digital;
+    $('#cuadranteViewer').hidden = digital;
+  });
+});
+
+function setOriginalViewerEmpty(){
+  const viewer = $('#cuadranteViewer');
+  viewer.hidden = false;
+  viewer.classList.add('empty');
+  viewer.innerHTML = '<p>Todavía no hay ningún cuadrante subido.</p>';
+}
+
+function renderOriginalViewer(mime, url){
+  const viewer = $('#cuadranteViewer');
+  viewer.classList.remove('empty');
+  viewer.hidden = true; // por defecto se muestra la vista digital
+  if (mime === 'application/pdf') {
+    viewer.innerHTML = `<embed id="pdfEmbed" src="${url}" type="application/pdf">`;
+  } else {
+    viewer.innerHTML = `<img id="pdfEmbed" src="${url}" alt="Cuadrante" style="width:100%; display:block;">`;
+  }
 }
 
 function jumpToPage(page){
   const embed = $('#pdfEmbed');
-  if (embed && currentPdfUrl) embed.setAttribute('src', `${currentPdfUrl}#page=${page}`);
+  if (!embed || !currentDocUrl) return;
+  $$('#viewToggle .vt-btn').forEach(b => b.classList.toggle('active', b.dataset.view === 'original'));
+  $('#digitalView').hidden = true;
+  $('#cuadranteViewer').hidden = false;
+  if (currentDocMime === 'application/pdf') embed.setAttribute('src', `${currentDocUrl}#page=${page}`);
 }
 
-/* ---------- Localizar mi nombre en el PDF (pdf.js, en el navegador) ---------- */
-const nameInput = $('#myNameInput');
-nameInput.value = localStorage.getItem('hg_myname') || '';
-nameInput.addEventListener('change', () => {
-  localStorage.setItem('hg_myname', nameInput.value.trim());
-  renderNameMatches();
-});
+/* =========================================================
+   Extracción de texto posicionado — PDF (pdf.js) e imagen (Tesseract OCR)
+   Ambas convergen en el mismo formato: pages = [{ width, lines: [{items, text}] }]
+   ========================================================= */
+function clusterItemsIntoLines(items, yTolerance = 6){
+  const sorted = items.slice().sort((a, b) => a.y - b.y);
+  const lines = [];
+  sorted.forEach(it => {
+    const line = lines[lines.length - 1];
+    if (!line || Math.abs(it.y - line.avgY) > yTolerance) {
+      lines.push({ avgY: it.y, items: [it] });
+    } else {
+      line.items.push(it);
+      line.avgY = (line.avgY * (line.items.length - 1) + it.y) / line.items.length;
+    }
+  });
+  return lines
+    .map(l => {
+      const items2 = l.items.slice().sort((a, b) => a.x - b.x);
+      return { items: items2, text: items2.map(i => i.text).join(' ').replace(/\s+/g, ' ').trim() };
+    })
+    .filter(l => l.text);
+}
 
+async function extractPagesFromPdf(blob){
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  const buf = await blob.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+  const pages = [];
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const viewport = page.getViewport({ scale: 1 });
+    const content = await page.getTextContent();
+    const items = content.items.map(it => ({ text: it.str, x: it.transform[4], y: -it.transform[5] }));
+    pages.push({ width: viewport.width, lines: clusterItemsIntoLines(items) });
+  }
+  return pages;
+}
+
+async function extractPagesFromImage(blob, onProgress){
+  if (typeof Tesseract === 'undefined') throw new Error('Tesseract no disponible');
+  const { data } = await Tesseract.recognize(blob, 'spa', { logger: onProgress });
+  const items = (data.words || []).map(w => ({ text: w.text, x: w.bbox.x0, y: w.bbox.y0 }));
+  const width = data.width || (items.length ? Math.max(...items.map(i => i.x)) : 1000);
+  return [{ width, lines: clusterItemsIntoLines(items, 10) }];
+}
+
+/* =========================================================
+   Parsers — de texto posicionado a asignaciones estructuradas
+   ========================================================= */
 function normalizeText(s){
   return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 }
+function normalizeKey(s){ return normalizeText(s).replace(/[^a-z0-9]+/g, ' ').trim(); }
 
-function groupTextIntoLines(items){
-  const rows = {};
-  items.forEach(it => {
-    const y = Math.round(it.transform[5]);
-    if (!rows[y]) rows[y] = [];
-    rows[y].push(it.str);
+function splitLineByColumn(line, width, ratio = 0.6){
+  const splitX = width * ratio;
+  const leftItems = line.items.filter(i => i.x < splitX);
+  const rightItems = line.items.filter(i => i.x >= splitX);
+  return {
+    left: leftItems.map(i => i.text).join(' ').replace(/\s+/g, ' ').trim(),
+    right: rightItems.map(i => i.text).join(' ').replace(/\s+/g, ' ').trim(),
+  };
+}
+
+function detectTipo(pages){
+  const key = normalizeKey(pages.map(p => p.lines.map(l => l.text).join(' ')).join(' '));
+  if (key.includes('tesoros de la biblia') || key.includes('seamos mejores maestros')) return 'entre-semana';
+  if (key.includes('discursante') && key.includes('congregacion')) return 'publica';
+  return 'desconocido';
+}
+
+const MIDWEEK_SECTIONS = ['tesoros de la biblia', 'seamos mejores maestros', 'nuestra vida cristiana', 'vivamos como cristianos'];
+
+function parseMidweek(pages){
+  const asignaciones = [];
+  let fecha = null, lectura = null, seccion = null;
+  pages.forEach(page => {
+    page.lines.forEach(line => {
+      const t = line.text;
+      const dateMatch = t.match(/^(\d{4}\/\d{2}\/\d{2})\s*\|\s*(.+)$/);
+      if (dateMatch) { fecha = dateMatch[1]; lectura = dateMatch[2].trim(); seccion = null; return; }
+      if (MIDWEEK_SECTIONS.includes(normalizeKey(t))) { seccion = t.trim(); return; }
+      if (/^sala auxiliar/i.test(t) || /^auditorio principal/i.test(t) || /^impreso/i.test(t)) return;
+      if (!fecha) return;
+
+      const { left, right } = splitLineByColumn(line, page.width);
+      if (!left && !right) return;
+
+      const timeMatch = left.match(/^(\d{1,2}:\d{2})\s*[•·]?\s*(.*)$/);
+      const hora = timeMatch ? timeMatch[1] : null;
+      const parte = (timeMatch ? timeMatch[2] : left).replace(/^[•·]\s*/, '').trim();
+      if (!right) {
+        if (parte) asignaciones.push({ fecha, lectura, seccion, hora, parte, rol: null, nombres: [] });
+        return;
+      }
+      const roleMatch = right.match(/^(Oraci[oó]n|Presidente|Conductor|Lector|Consejero de la sala auxiliar)\s+(.*)$/i);
+      const rol = roleMatch ? roleMatch[1] : null;
+      const nombreTexto = roleMatch ? roleMatch[2] : right;
+      const nombres = nombreTexto.split('/').map(n => n.trim()).filter(Boolean);
+      if (parte || nombres.length) asignaciones.push({ fecha, lectura, seccion, hora, parte, rol, nombres });
+    });
   });
-  return Object.keys(rows).sort((a, b) => b - a).map(y => rows[y].join(' ').replace(/\s+/g, ' ').trim());
+  return asignaciones;
 }
 
-function extractDateLike(line){
-  if (!line) return null;
-  const monthMatch = line.match(/\d{1,2}\s*(?:de\s*)?(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene\.?|feb\.?|mar\.?|abr\.?|may\.?|jun\.?|jul\.?|ago\.?|sep\.?|oct\.?|nov\.?|dic\.?)/i);
-  if (monthMatch) return monthMatch[0].trim();
-  const numMatch = line.match(/\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b/);
-  if (numMatch) return numMatch[0];
-  const wd = line.match(/(lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)/i);
-  if (wd) return wd[0];
-  return null;
+const PUBLIC_LEFT_DEFS = [
+  { key: 'discursante', phrase: 'DISCURSANTE' },
+  { key: 'tema', phrase: 'TEMA' },
+  { key: 'congregacion', phrase: 'CONGREGACI[OÓ]N' },
+];
+const PUBLIC_RIGHT_DEFS = [
+  { key: 'presidente', phrase: 'PRESIDENTE' },
+  { key: 'lectorAtalaya', phrase: 'LECTOR\\s+DE\\s+LA\\s+ATALAYA' },
+  { key: 'oracionConclusion', phrase: 'ORACI[OÓ]N\\s+DE\\s+CONCLUSI[OÓ]N' },
+];
+
+function extractFieldsByAnchors(text, defs){
+  const found = [];
+  defs.forEach(({ key, phrase }) => {
+    const m = new RegExp(phrase, 'i').exec(text);
+    if (m) found.push({ key, start: m.index, end: m.index + m[0].length });
+  });
+  found.sort((a, b) => a.start - b.start);
+  const result = {};
+  found.forEach((f, i) => {
+    const end = i + 1 < found.length ? found[i + 1].start : text.length;
+    result[f.key] = text.slice(f.end, end).trim();
+  });
+  return result;
 }
 
+function parsePublica(pages){
+  const blocks = [];
+  let current = null;
+  pages.forEach(page => {
+    page.lines.forEach(line => {
+      const t = line.text;
+      const dateMatch = t.match(/^(\d{1,2}\s+[A-ZÁÉÍÓÚÑ]+\s+\d{4})$/);
+      if (dateMatch) { current = { fecha: dateMatch[1], leftLines: [], rightLines: [] }; blocks.push(current); return; }
+      if (!current) return;
+      const { left, right } = splitLineByColumn(line, page.width, 0.5);
+      if (left) current.leftLines.push(left);
+      if (right) current.rightLines.push(right);
+    });
+  });
+
+  return blocks
+    .map(b => {
+      const leftText = b.leftLines.join(' ');
+      const rightText = b.rightLines.join(' ');
+      if (/ASAMBLEA/i.test(leftText + ' ' + rightText)) return { fecha: b.fecha, asamblea: true };
+      return { fecha: b.fecha, ...extractFieldsByAnchors(leftText, PUBLIC_LEFT_DEFS), ...extractFieldsByAnchors(rightText, PUBLIC_RIGHT_DEFS) };
+    })
+    .filter(a => a.asamblea || a.discursante);
+}
+
+function parseCuadrante(pages){
+  const tipo = detectTipo(pages);
+  if (tipo === 'entre-semana') return { tipo, asignaciones: parseMidweek(pages) };
+  if (tipo === 'publica') return { tipo, asignaciones: parsePublica(pages) };
+  return { tipo, asignaciones: [] };
+}
+
+/* =========================================================
+   Vista digitalizada
+   ========================================================= */
 function highlightName(text, name){
   const escaped = escapeHtml(text);
   if (!name) return escaped;
@@ -280,63 +541,120 @@ function highlightName(text, name){
   } catch (e) { return escaped; }
 }
 
-async function findNameInPdf(blob, name){
-  if (!blob || !name) return [];
-  if (typeof pdfjsLib === 'undefined') return [];
-  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-  const buf = await blob.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-  const target = normalizeText(name);
-  const results = [];
-  for (let p = 1; p <= pdf.numPages; p++) {
-    const page = await pdf.getPage(p);
-    const content = await page.getTextContent();
-    const lines = groupTextIntoLines(content.items);
-    lines.forEach((line, idx) => {
-      if (!line || !normalizeText(line).includes(target)) return;
-      let date = extractDateLike(line);
-      for (let back = 1; !date && back <= 5 && idx - back >= 0; back++) {
-        date = extractDateLike(lines[idx - back]);
-      }
-      results.push({ page: p, text: line, date });
-    });
+function renderDigitalView(parsed){
+  const box = $('#digitalView');
+  if (!parsed || !parsed.asignaciones || parsed.asignaciones.length === 0) {
+    box.innerHTML = `<p class="empty-note">${parsed && parsed.error
+      ? 'No se pudo digitalizar este documento. Consulta "Documento original".'
+      : parsed && parsed.tipo === 'desconocido'
+        ? 'No reconocemos el formato de este documento todavía; consulta "Documento original".'
+        : 'Sube un cuadrante para ver aquí la versión digitalizada.'}</p>`;
+    return;
   }
-  return results;
+
+  if (parsed.tipo === 'entre-semana') {
+    const porFecha = [];
+    parsed.asignaciones.forEach(a => {
+      let grupo = porFecha.find(g => g.fecha === a.fecha);
+      if (!grupo) { grupo = { fecha: a.fecha, lectura: a.lectura, filas: [] }; porFecha.push(grupo); }
+      grupo.filas.push(a);
+    });
+    box.innerHTML = porFecha.map(g => `
+      <div class="digital-week">
+        <h3>${escapeHtml(g.fecha)}${g.lectura ? ` · ${escapeHtml(g.lectura)}` : ''}</h3>
+        ${g.filas.map(f => `
+          <div class="digital-row">
+            <span class="dr-hora">${f.hora ? escapeHtml(f.hora) : ''}</span>
+            <span class="dr-parte">${escapeHtml(f.parte || '')}</span>
+            <span class="dr-nombre">${f.rol ? `<em>${escapeHtml(f.rol)}</em> ` : ''}${escapeHtml((f.nombres || []).join(' / '))}</span>
+          </div>`).join('')}
+      </div>`).join('');
+    return;
+  }
+
+  if (parsed.tipo === 'publica') {
+    box.innerHTML = parsed.asignaciones.map(a => a.asamblea ? `
+      <div class="digital-week"><h3>${escapeHtml(a.fecha)}</h3><p class="empty-note">Asamblea — sin reunión pública.</p></div>
+    ` : `
+      <div class="digital-week">
+        <h3>${escapeHtml(a.fecha)}</h3>
+        <div class="digital-row"><span class="dr-parte">Discurso</span><span class="dr-nombre">${escapeHtml(a.discursante || '')}</span></div>
+        ${a.tema ? `<div class="digital-row"><span class="dr-parte">Tema</span><span class="dr-nombre">${escapeHtml(a.tema)}</span></div>` : ''}
+        ${a.congregacion ? `<div class="digital-row"><span class="dr-parte">Congregación</span><span class="dr-nombre">${escapeHtml(a.congregacion)}</span></div>` : ''}
+        <div class="digital-row"><span class="dr-parte">Presidente</span><span class="dr-nombre">${escapeHtml(a.presidente || '')}</span></div>
+        <div class="digital-row"><span class="dr-parte">Lector de La Atalaya</span><span class="dr-nombre">${escapeHtml(a.lectorAtalaya || '')}</span></div>
+        <div class="digital-row"><span class="dr-parte">Oración de conclusión</span><span class="dr-nombre">${escapeHtml(a.oracionConclusion || '')}</span></div>
+      </div>`).join('');
+    return;
+  }
+
+  box.innerHTML = '';
 }
 
-let nameSearchToken = 0;
-async function renderNameMatches(){
+/* ---------- Localizar mi nombre a partir de los datos digitalizados ---------- */
+const nameInput = $('#myNameInput');
+nameInput.value = localStorage.getItem('hg_myname') || '';
+nameInput.addEventListener('change', () => {
+  localStorage.setItem('hg_myname', nameInput.value.trim());
+  renderNameMatches();
+});
+
+function findMyAssignments(parsed, name){
+  if (!parsed || !name) return [];
+  const target = normalizeText(name);
+  const out = [];
+
+  if (parsed.tipo === 'entre-semana') {
+    parsed.asignaciones.forEach(a => {
+      const nombres = a.nombres || [];
+      if (nombres.some(n => normalizeText(n).includes(target))) {
+        out.push({
+          fecha: a.fecha,
+          etiqueta: [a.hora, a.rol].filter(Boolean).join(' · '),
+          detalle: a.parte || a.rol || '',
+          nombreTexto: nombres.join(' / '),
+        });
+      }
+    });
+  } else if (parsed.tipo === 'publica') {
+    parsed.asignaciones.forEach(a => {
+      if (a.asamblea) return;
+      const roles = [
+        ['discursante', 'Discursante'], ['presidente', 'Presidente'],
+        ['lectorAtalaya', 'Lector de La Atalaya'], ['oracionConclusion', 'Oración de conclusión'],
+      ];
+      roles.forEach(([key, label]) => {
+        if (a[key] && normalizeText(a[key]).includes(target)) {
+          out.push({ fecha: a.fecha, etiqueta: label, detalle: a.tema || '', nombreTexto: a[key] });
+        }
+      });
+    });
+  }
+  return out;
+}
+
+function renderNameMatches(){
   const box = $('#nameMatches');
   const name = nameInput.value.trim();
 
-  if (!currentPdfBlob) { box.innerHTML = ''; return; }
-  if (!name) { box.innerHTML = '<p class="nm-status">Añade tu nombre arriba para ver aquí tus asignaciones, sin abrir el PDF.</p>'; return; }
+  if (!currentParsed || !currentParsed.asignaciones || currentParsed.asignaciones.length === 0) { box.innerHTML = ''; return; }
+  if (!name) { box.innerHTML = '<p class="nm-status">Añade tu nombre arriba para ver aquí tus asignaciones, sin abrir el documento.</p>'; return; }
 
-  const token = ++nameSearchToken;
-  box.innerHTML = '<p class="nm-status">Buscando tus asignaciones…</p>';
-  try {
-    const matches = await findNameInPdf(currentPdfBlob, name);
-    if (token !== nameSearchToken) return; // una búsqueda más nueva ya está en marcha
-    if (matches.length === 0) {
-      box.innerHTML = `<p class="nm-status">No aparece "${escapeHtml(name)}" en este cuadrante.</p>`;
-      return;
-    }
-    box.innerHTML = `
-      <p class="nm-status">Esto es lo que tienes:</p>
-      <ul class="nm-cards">${matches.map(m => `
-        <li data-page="${m.page}">
-          <div class="nm-top">
-            <span class="nm-fecha">${m.date ? escapeHtml(m.date) : 'Sin fecha detectada'}</span>
-            <span class="nm-pagesmall">pág. ${m.page}</span>
-          </div>
-          <div class="nm-detalle">${highlightName(m.text, name)}</div>
-        </li>`).join('')}</ul>
-      <p class="nm-hint">Toca una tarjeta para ver esa página del PDF si necesitas más contexto.</p>`;
-    box.querySelectorAll('li[data-page]').forEach(li => li.addEventListener('click', () => jumpToPage(li.dataset.page)));
-  } catch (err) {
-    console.error(err);
-    if (token === nameSearchToken) box.innerHTML = '<p class="nm-status">No se pudo analizar el PDF para buscar tu nombre.</p>';
+  const matches = findMyAssignments(currentParsed, name);
+  if (matches.length === 0) {
+    box.innerHTML = `<p class="nm-status">No aparece "${escapeHtml(name)}" en este cuadrante.</p>`;
+    return;
   }
+  box.innerHTML = `
+    <p class="nm-status">Esto es lo que tienes:</p>
+    <ul class="nm-cards">${matches.map(m => `
+      <li>
+        <div class="nm-top">
+          <span class="nm-fecha">${escapeHtml(m.fecha)}</span>
+          ${m.etiqueta ? `<span class="nm-pagesmall">${escapeHtml(m.etiqueta)}</span>` : ''}
+        </div>
+        <div class="nm-detalle">${m.detalle ? escapeHtml(m.detalle) + ' — ' : ''}${highlightName(m.nombreTexto, name)}</div>
+      </li>`).join('')}</ul>`;
 }
 
 /* =========================================================
@@ -477,7 +795,7 @@ function openEventModal(id, presetDate){
   $('#modalSave').addEventListener('click', async () => {
     const title = $('#fTitle').value.trim();
     const date = $('#fDate').value;
-    if (!title || !date) { alert('Falta título o fecha.'); return; }
+    if (!title || !date) { showError('Falta título o fecha.'); return; }
     const data = {
       id: existing ? existing.id : 'e_' + Date.now(),
       title, date,
@@ -630,7 +948,7 @@ function openProyectoModal(id){
 
   $('#modalSave').addEventListener('click', async () => {
     const titulo = $('#pTitulo').value.trim();
-    if (!titulo) { alert('Falta el título.'); return; }
+    if (!titulo) { showError('Falta el título.'); return; }
     const rows = $$('#partesWrap .parte-input-row').map(row => ({
       titulo: row.querySelector('.pt-titulo').value.trim(),
       asignado: row.querySelector('.pt-asignado').value.trim(),
