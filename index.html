@@ -50,19 +50,26 @@
     <div class="panel-head">
       <h2>Cuadrante de asignaciones</h2>
       <label class="btn btn-primary file-btn">
-        Subir PDF
-        <input type="file" id="pdfInput" accept="application/pdf" hidden>
+        Subir PDF o imagen
+        <input type="file" id="pdfInput" accept="application/pdf,image/*" hidden>
       </label>
     </div>
     <div id="cuadranteMeta" class="meta-line"></div>
 
     <div class="name-search">
-      <label for="myNameInput">Mi nombre (para localizarte en el PDF)</label>
+      <label for="myNameInput">Mi nombre (para ver aquí tus asignaciones)</label>
       <input type="text" id="myNameInput" placeholder="p. ej. Juan Martín">
     </div>
     <div id="nameMatches" class="name-matches"></div>
 
-    <div id="cuadranteViewer" class="pdf-viewer empty">
+    <div class="view-toggle" id="viewToggle" hidden>
+      <button class="vt-btn active" data-view="digital">Vista digital</button>
+      <button class="vt-btn" data-view="original">Documento original</button>
+    </div>
+
+    <div id="digitalView" class="digital-view"></div>
+
+    <div id="cuadranteViewer" class="pdf-viewer empty" hidden>
       <p>Todavía no hay ningún cuadrante subido.</p>
     </div>
   </section>
@@ -98,6 +105,7 @@
 
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.0.4/tesseract.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
