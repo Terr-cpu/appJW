@@ -451,11 +451,14 @@ function splitLineByColumn(line, splitX){
 /* Limpia artefactos típicos de fuentes con mapeo Unicode roto en el PDF de origen
    (viñetas que se extraen como "e", "«", "+", comas en vez de puntos, etc.) */
 function cleanParteText(s){
-  return String(s || '')
-    .replace(/^[•·*+«»]\s*/, '')
-    .replace(/^([a-zA-Z])\s+(?=[A-ZÁÉÍÓÚÑ0-9¿])/, '')
-    .replace(/^(\d+)[,;]\s*/, '$1. ')
-    .trim();
+  let t = String(s || '').trim();
+  // 1) Quita cualquier viñeta/artefacto de 1-2 caracteres NO alfanuméricos al principio
+  t = t.replace(/^[^\wÀ-ÿ¿¡0-9]{1,2}\s*/, '');
+  // 2) Si empieza por número de parte, normaliza "N," / "N;" a "N."
+  t = t.replace(/^(\d{1,2})[,;]\s*/, '$1. ');
+  // 3) Quita una letra suelta (artefacto de fuente), p.ej. "e Palabras" → "Palabras"
+  t = t.replace(/^[a-zA-Z]\s+(?=[A-ZÁÉÍÓÚÑ0-9¿])/, '');
+  return t.trim();
 }
 
 function detectTipo(pages){
@@ -467,16 +470,47 @@ function detectTipo(pages){
 
 const MIDWEEK_SECTIONS = ['tesoros de la biblia', 'seamos mejores maestros', 'nuestra vida cristiana', 'vivamos como cristianos'];
 
+/* Igual que en "publica": no se procesa línea a línea de forma aislada. Cada FILA LÓGICA
+   (todo lo que cuelga de una misma hora, aunque el título de la parte o el nombre se
+   repartan en varias líneas por ser largos) se acumula y se cierra solo cuando llega la
+   siguiente hora, sección o fecha. Así los nombres largos partidos en dos líneas no se
+   convierten en "asignaciones fantasma" sueltas. */
 function parseMidweek(pages){
   const asignaciones = [];
   let fecha = null, lectura = null, seccion = null;
+  let currentRow = null;
+
+  function flushRow(){
+    if (!currentRow) return;
+    const leftText = currentRow.leftParts.join(' ').replace(/\s+/g, ' ').trim();
+    let rightText = currentRow.rightParts.join(' ').replace(/\s+/g, ' ').trim();
+    const hora = currentRow.hora;
+    let parte = cleanParteText(leftText);
+
+    const durMatch = rightText.match(/^\((\d+\s*min\.?)\)\s*/i);
+    if (durMatch) { parte = `${parte} (${durMatch[1]})`.trim(); rightText = rightText.slice(durMatch[0].length).trim(); }
+
+    if (!rightText) {
+      if (parte) asignaciones.push({ fecha: currentRow.fecha, lectura: currentRow.lectura, seccion: currentRow.seccion, hora, parte, rol: null, nombres: [] });
+    } else {
+      const roleMatch = rightText.match(/^(Oraci[oó]n|Presidente|Conductor|Lector|Consejero de la sala auxiliar)\s+(.*)$/i);
+      const rol = roleMatch ? roleMatch[1] : null;
+      const nombreTexto = roleMatch ? roleMatch[2] : rightText;
+      const nombres = nombreTexto.split('/').map(n => n.trim()).filter(Boolean);
+      if (parte || nombres.length) {
+        asignaciones.push({ fecha: currentRow.fecha, lectura: currentRow.lectura, seccion: currentRow.seccion, hora, parte, rol, nombres });
+      }
+    }
+    currentRow = null;
+  }
+
   pages.forEach(page => {
     const splitX = detectColumnSplit(page);
     page.lines.forEach(line => {
       const t = line.text;
       const dateMatch = t.match(/^(\d{4}\/\d{2}\/\d{2})\s*\|\s*(.+)$/);
-      if (dateMatch) { fecha = dateMatch[1]; lectura = dateMatch[2].trim(); seccion = null; return; }
-      if (MIDWEEK_SECTIONS.includes(normalizeKey(t))) { seccion = t.trim(); return; }
+      if (dateMatch) { flushRow(); fecha = dateMatch[1]; lectura = dateMatch[2].trim(); seccion = null; return; }
+      if (MIDWEEK_SECTIONS.includes(normalizeKey(t))) { flushRow(); seccion = t.trim(); return; }
       if (/^sala auxiliar/i.test(t) || /^auditorio principal/i.test(t) || /^impreso/i.test(t)) return;
       if (!fecha) return;
 
@@ -484,25 +518,28 @@ function parseMidweek(pages){
       if (!left && !right) return;
 
       const timeMatch = left.match(/^(\d{1,2}:\d{2})\s*(.*)$/);
-      const hora = timeMatch ? timeMatch[1] : null;
-      let parte = cleanParteText(timeMatch ? timeMatch[2] : left);
+      const rightStartsRole = /^(Oraci[oó]n|Presidente|Conductor|Lector|Consejero de la sala auxiliar)\b/i.test(right);
 
-      // A veces la duración "(NN min.)" cae justo al otro lado de la frontera de columna
-      let rightText = right;
-      const durMatch = rightText.match(/^\((\d+\s*min\.?)\)\s*/i);
-      if (durMatch) { parte = `${parte} (${durMatch[1]})`.trim(); rightText = rightText.slice(durMatch[0].length).trim(); }
-
-      if (!rightText) {
-        if (parte) asignaciones.push({ fecha, lectura, seccion, hora, parte, rol: null, nombres: [] });
-        return;
+      if (timeMatch) {
+        flushRow();
+        currentRow = { fecha, lectura, seccion, hora: timeMatch[1], leftParts: [timeMatch[2]], rightParts: [right] };
+      } else if (currentRow && rightStartsRole && currentRow.rightParts.some(p => p)) {
+        // Segundo rol para la MISMA parte (p. ej. "Conductor" + "Lector" en el estudio bíblico):
+        // cierra la asignación ya acumulada y abre otra con la misma hora/parte para este nuevo rol.
+        const { fecha: f2, lectura: l2, seccion: s2, hora: h2, leftParts: lp2 } = currentRow;
+        flushRow();
+        currentRow = { fecha: f2, lectura: l2, seccion: s2, hora: h2, leftParts: lp2.slice(), rightParts: [right] };
+      } else if (currentRow) {
+        // continuación (línea envuelta) de la fila abierta: se añade a lo que ya había
+        if (left) currentRow.leftParts.push(left);
+        if (right) currentRow.rightParts.push(right);
+      } else {
+        // línea suelta sin hora todavía al principio de la fecha/sección
+        currentRow = { fecha, lectura, seccion, hora: null, leftParts: [left], rightParts: [right] };
       }
-      const roleMatch = rightText.match(/^(Oraci[oó]n|Presidente|Conductor|Lector|Consejero de la sala auxiliar)\s+(.*)$/i);
-      const rol = roleMatch ? roleMatch[1] : null;
-      const nombreTexto = roleMatch ? roleMatch[2] : rightText;
-      const nombres = nombreTexto.split('/').map(n => n.trim()).filter(Boolean);
-      if (parte || nombres.length) asignaciones.push({ fecha, lectura, seccion, hora, parte, rol, nombres });
     });
   });
+  flushRow();
   return asignaciones;
 }
 
@@ -671,8 +708,10 @@ function findMyAssignments(parsed, name){
       if (nombres.some(n => normalizeText(n).includes(target))) {
         out.push({
           fecha: a.fecha,
-          etiqueta: [a.hora, a.rol].filter(Boolean).join(' · '),
-          detalle: a.parte || a.rol || '',
+          etiqueta: a.hora || '',
+          // Si es un rol (Oración/Presidente/Conductor/Lector), lo que "tienes" es el rol,
+          // no el título de la canción o parte a la que va pegado en el documento.
+          detalle: a.rol || a.parte || '',
           nombreTexto: nombres.join(' / '),
         });
       }
