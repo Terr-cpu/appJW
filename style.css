@@ -152,6 +152,38 @@ main{max-width:720px; margin:0 auto; padding:20px 20px 60px;}
   border-left:3px solid; display:inline-block;
 }
 
+/* Botón de ocultar una asignación (vista digital y "mis asignaciones") */
+.digital-row{position:relative; padding-right:26px;}
+.digital-week h3{position:relative; padding-right:26px;}
+.dv-del{
+  position:absolute; top:50%; right:0; transform:translateY(-50%);
+  background:none; border:none; cursor:pointer; color:var(--ink-soft);
+  font-size:.9rem; line-height:1; padding:4px; opacity:.45;
+}
+.digital-week h3 .dv-del{top:2px; transform:none;}
+.nm-cards li{position:relative; padding-right:30px;}
+.nm-cards li .dv-del{right:6px;}
+.dv-del:hover{opacity:1; color:var(--brick);}
+
+/* Barra de "asignaciones ocultas" */
+.hidden-bar{
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  font-size:.78rem; color:var(--ink-soft);
+  background:var(--surface); border:1px solid var(--line); border-radius:10px;
+  padding:8px 12px; margin-bottom:12px;
+}
+.hidden-bar .btn{padding:5px 12px; font-size:.75rem;}
+
+#goProgramaBtn{align-self:flex-start; margin-top:4px;}
+
+/* Eventos del calendario generados automáticamente */
+.upcoming-list li.ev-auto{border-left:3px solid var(--teal);}
+.upcoming-list li.ev-auto .ev-title em{font-style:normal; font-weight:400; color:var(--ink-soft); font-size:.8rem;}
+
+/* Vista Programa a pantalla completa */
+#tab-programa .digital-view{gap:16px;}
+#tab-programa .pdf-viewer embed, #tab-programa .pdf-viewer iframe{height:80vh;}
+
 /* ---------- Calendar ---------- */
 .cal-nav{display:flex; align-items:center; justify-content:center; gap:16px; margin-bottom:10px;}
 .cal-label{font-family:var(--font-display); font-weight:600; font-size:1.05rem; min-width:170px; text-align:center;}
