@@ -443,7 +443,7 @@ function joinItemsX(items){
     if (i === 0 || prevEnd == null) { out = frag; prevEnd = it.x + (it.w || 0); return; }
     const gap = it.x - prevEnd;
     const glued = /\s$/.test(out) || /^\s/.test(frag);
-    out += (!glued && gap > refH * 0.28 ? ' ' : '') + frag;
+    out += (!glued && gap > refH * 0.2 ? ' ' : '') + frag;
     prevEnd = it.x + (it.w || 0);
   });
   return out.replace(/\s+/g, ' ').trim();
@@ -808,6 +808,11 @@ function parsePublica(pages){
 
     const f = { fecha: b.fecha, discursante: '', tema: '', congregacion: '', presidente: '', lectorAtalaya: '', oracionConclusion: '' };
     let activeL = null, activeR = null;
+    // Un valor puede aparecer ANTES que su etiqueta (2ª línea de un nombre que
+    // se agrupa por encima de la fila de la etiqueta). Se guarda en espera y se
+    // adjudica en cuanto se fija la etiqueta de esa mitad.
+    let pendingL = '', pendingR = '';
+    const addTo = (key, text) => { if (text) f[key] += (f[key] ? ' ' : '') + text; };
     b.rows.forEach(cells => {
       cells.forEach(cell => {
         const right = cell.x >= b.split;
@@ -816,8 +821,9 @@ function parsePublica(pages){
         for (const lab of labels) {
           const rest = stripPublicLabel(cell.text, lab.re);
           if (rest == null) continue;
-          if (right) activeR = lab.key; else activeL = lab.key;
-          if (rest) f[lab.key] += (f[lab.key] ? ' ' : '') + rest;
+          if (right) { activeR = lab.key; if (pendingR) { addTo(lab.key, pendingR); pendingR = ''; } }
+          else { activeL = lab.key; if (pendingL) { addTo(lab.key, pendingL); pendingL = ''; } }
+          addTo(lab.key, rest);
           isLabel = true;
           break;
         }
@@ -828,7 +834,9 @@ function parsePublica(pages){
           if (!val) return; // era solo el resto de una etiqueta partida
         }
         const active = right ? activeR : activeL;
-        if (active) f[active] += (f[active] ? ' ' : '') + val;
+        if (active) addTo(active, val);
+        else if (right) pendingR += (pendingR ? ' ' : '') + val;
+        else pendingL += (pendingL ? ' ' : '') + val;
       });
     });
     Object.keys(f).forEach(k => { if (typeof f[k] === 'string') f[k] = f[k].replace(/\s+/g, ' ').trim(); });
