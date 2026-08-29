@@ -1,0 +1,38 @@
+{
+  "name": "Hourglass · Panel de la congregación",
+  "short_name": "Hourglass",
+  "description": "Cuadrante de asignaciones, calendario, tareas y horas de ministerio — todo guardado en tu Google Drive.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "id": "hourglass-panel",
+  "display": "standalone",
+  "background_color": "#FAF6EE",
+  "theme_color": "#1E2A38",
+  "orientation": "portrait",
+  "lang": "es",
+  "dir": "ltr",
+  "categories": ["productivity", "utilities"],
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    {
+      "name": "Nueva tarea",
+      "short_name": "Tarea",
+      "url": "./index.html?go=tareas&nueva=1",
+      "icons": [{ "src": "icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Hoy",
+      "short_name": "Hoy",
+      "url": "./index.html?go=inicio"
+    },
+    {
+      "name": "Ministerio",
+      "short_name": "Ministerio",
+      "url": "./index.html?go=ministerio"
+    }
+  ]
+}
