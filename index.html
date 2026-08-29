@@ -39,15 +39,22 @@
 </header>
 
 <nav class="tabs" id="tabs" hidden>
-  <button class="tab active" data-tab="cuadrante">Cuadrante</button>
+  <button class="tab active" data-tab="inicio">Inicio</button>
+  <button class="tab" data-tab="cuadrante">Cuadrante</button>
   <button class="tab" data-tab="programa">Programa</button>
   <button class="tab" data-tab="calendario">Calendario</button>
+  <button class="tab" data-tab="ministerio">Ministerio</button>
   <button class="tab" data-tab="proyectos">Proyectos</button>
 </nav>
 
 <main id="app" hidden>
 
-  <section id="tab-cuadrante" class="panel active">
+  <section id="tab-inicio" class="panel active">
+    <div class="panel-head"><h2>Inicio</h2></div>
+    <div id="dashboard" class="dashboard"></div>
+  </section>
+
+  <section id="tab-cuadrante" class="panel">
     <div class="panel-head">
       <h2>Cuadrante de asignaciones</h2>
       <label class="btn btn-primary file-btn">
@@ -70,6 +77,7 @@
     <div class="panel-head">
       <h2>Programa</h2>
     </div>
+    <div id="cuadranteHistory" class="cuad-hist" hidden></div>
     <div class="view-toggle" id="viewToggle" hidden>
       <button class="vt-btn active" data-view="digital">Vista digital</button>
       <button class="vt-btn" data-view="original">Documento original</button>
@@ -97,6 +105,15 @@
       <h3>Próximo</h3>
       <ul id="upcomingList" class="upcoming-list"></ul>
     </div>
+  </section>
+
+  <section id="tab-ministerio" class="panel">
+    <div class="panel-head">
+      <h2>Ministerio</h2>
+      <button id="addMinisterioBtn" class="btn btn-primary">+ Añadir salida</button>
+    </div>
+    <div id="ministerioStats" class="min-stats"></div>
+    <div id="ministerioList" class="min-list"></div>
   </section>
 
   <section id="tab-proyectos" class="panel">
