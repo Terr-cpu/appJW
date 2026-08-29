@@ -42,6 +42,7 @@
   <button class="tab active" data-tab="inicio">Inicio</button>
   <button class="tab" data-tab="cuadrante">Cuadrante</button>
   <button class="tab" data-tab="programa">Programa</button>
+  <button class="tab" data-tab="tareas">Tareas</button>
   <button class="tab" data-tab="calendario">Calendario</button>
   <button class="tab" data-tab="ministerio">Ministerio</button>
   <button class="tab" data-tab="proyectos">Proyectos</button>
@@ -105,6 +106,21 @@
       <h3>Próximo</h3>
       <ul id="upcomingList" class="upcoming-list"></ul>
     </div>
+  </section>
+
+  <section id="tab-tareas" class="panel">
+    <div class="panel-head">
+      <h2>Tareas</h2>
+      <button id="addTareaBtn" class="btn btn-primary">+ Nueva tarea</button>
+    </div>
+    <div id="tareasNav" class="tk-nav">
+      <button class="tk-vbtn active" data-view="hoy">Hoy</button>
+      <button class="tk-vbtn" data-view="proximo">Próximos 7 días</button>
+      <button class="tk-vbtn" data-view="todas">Todas</button>
+      <button class="tk-vbtn" data-view="hechas">Hechas</button>
+    </div>
+    <div id="tareasFiltros" class="tk-filtros"></div>
+    <div id="tareasList" class="tk-list"></div>
   </section>
 
   <section id="tab-ministerio" class="panel">
