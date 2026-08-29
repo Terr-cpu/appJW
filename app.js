@@ -9,6 +9,7 @@ const CONFIG = {
   CUADRANTE_PREFIX: 'cuadrante-actual',
   ASIGNACIONES_NAME: 'asignaciones.json',
   HISTORIAL_NAME: 'historial-asignaciones.json',
+  OCULTAS_NAME: 'asignaciones-ocultas.json',
   EVENTS_NAME: 'eventos.json',
   PROYECTOS_NAME: 'proyectos.json',
 };
@@ -19,6 +20,7 @@ const CONFIG = {
 let tokenClient, accessToken = null, folderId = null;
 let events = [];
 let proyectos = [];
+let hiddenKeys = new Set();   // claves de asignaciones ocultadas por el usuario
 let calMonth = new Date(calYearMonthStart());
 let notifiedIds = new Set(JSON.parse(localStorage.getItem('hg_notified') || '[]'));
 
@@ -85,8 +87,12 @@ async function onSignedIn(){
   try {
     await ensureFolder();
     await loadHistorial(); // primero, para que loadCuadrante pueda fusionar sin condición de carrera
-    await Promise.all([loadEvents(), loadProyectos(), loadCuadrante()]);
+    await loadHidden();
+    await loadEvents();     // antes de loadCuadrante: su sync al calendario necesita los eventos ya cargados
+    await Promise.all([loadProyectos(), loadCuadrante()]);
     renderNameMatches();
+    updateHiddenBar();
+    await syncMyAssignmentsToCalendar(); // vuelca mis asignaciones al calendario
     renderCalendar();
     renderUpcoming();
     renderProyectos();
@@ -134,14 +140,13 @@ function showError(msg){
   banner._hideTimer = setTimeout(() => banner.remove(), 8000);
 }
 
-$$('.tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    $$('.tab').forEach(t => t.classList.remove('active'));
-    $$('.panel').forEach(p => p.classList.remove('active'));
-    tab.classList.add('active');
-    $(`#tab-${tab.dataset.tab}`).classList.add('active');
-  });
-});
+function activateTab(name){
+  $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  $$('.panel').forEach(p => p.classList.toggle('active', p.id === `tab-${name}`));
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+$$('.tab').forEach(tab => tab.addEventListener('click', () => activateTab(tab.dataset.tab)));
+document.getElementById('goProgramaBtn').addEventListener('click', () => activateTab('programa'));
 
 /* =========================================================
    Drive — utilidades genéricas
@@ -291,9 +296,12 @@ async function loadCuadrante({ forceReparse = false, file = null } = {}){
     setOriginalViewerEmpty();
     $('#digitalView').innerHTML = '';
     meta.textContent = '';
+    const gp = document.getElementById('goProgramaBtn');
+    if (gp) gp.hidden = true;
     renderNameMatches();
     return;
   }
+  { const gp = document.getElementById('goProgramaBtn'); if (gp) gp.hidden = false; }
 
   const res = await downloadFile(f.id);
   const blob = await res.blob();
@@ -317,6 +325,8 @@ async function loadCuadrante({ forceReparse = false, file = null } = {}){
         await mergeIntoHistorial(currentParsed); // por si el historial aún no lo tenía (p. ej. tras esta actualización)
         renderDigitalView(currentParsed);
         renderNameMatches();
+        updateHiddenBar();
+        await syncMyAssignmentsToCalendar();
         return;
       } catch (e) { /* si falla, se reanaliza abajo */ }
     }
@@ -350,6 +360,8 @@ async function analyzeCuadrante(blob, mime){
   }
   renderDigitalView(currentParsed);
   renderNameMatches();
+  updateHiddenBar();
+  await syncMyAssignmentsToCalendar();
 }
 
 /* ---------- Historial de asignaciones (persiste aunque se reemplace el cuadrante) ---------- */
@@ -367,6 +379,54 @@ async function loadHistorial(){
 function assignmentKey(a){
   if (a.tipo === 'entre-semana') return ['mw', a.fecha, a.parte, a.rol, (a.nombres || []).join('/')].join('|');
   return ['pub', a.fecha, a.discursante || '', a.presidente || '', a.asamblea ? 'asamblea' : ''].join('|');
+}
+/* clave de una asignación de `currentParsed` (que no lleva `tipo` propio) */
+function keyOf(a, tipo){ return assignmentKey(tipo ? { tipo, ...a } : a); }
+function isHiddenKey(k){ return k && hiddenKeys.has(k); }
+
+/* ---------- Asignaciones ocultadas por el usuario (persisten en Drive) ---------- */
+async function loadHidden(){
+  const f = await findFile(CONFIG.OCULTAS_NAME, folderId, 'application/json');
+  if (!f) { hiddenKeys = new Set(); return; }
+  try {
+    const r = await downloadFile(f.id);
+    hiddenKeys = new Set(await r.json());
+  } catch (e) { hiddenKeys = new Set(); }
+}
+async function persistHidden(){
+  await saveFile(CONFIG.OCULTAS_NAME, 'application/json', JSON.stringify([...hiddenKeys], null, 2), folderId);
+}
+
+async function hideAssignment(key){
+  if (!key || hiddenKeys.has(key)) return;
+  hiddenKeys.add(key);
+  showSand('Guardando…');
+  try { await persistHidden(); } catch (e) { showError('No se pudo guardar el cambio.'); }
+  finally { hideSand(); }
+  renderDigitalView(currentParsed);
+  renderNameMatches();
+  updateHiddenBar();
+  await syncMyAssignmentsToCalendar();
+}
+async function resetHidden(){
+  if (hiddenKeys.size === 0) return;
+  hiddenKeys.clear();
+  showSand('Guardando…');
+  try { await persistHidden(); } catch (e) { showError('No se pudo guardar el cambio.'); }
+  finally { hideSand(); }
+  renderDigitalView(currentParsed);
+  renderNameMatches();
+  updateHiddenBar();
+  await syncMyAssignmentsToCalendar();
+}
+function updateHiddenBar(){
+  const bar = document.getElementById('hiddenBar');
+  if (!bar) return;
+  if (hiddenKeys.size === 0) { bar.hidden = true; bar.innerHTML = ''; return; }
+  bar.hidden = false;
+  bar.innerHTML = `<span>${hiddenKeys.size} asignación${hiddenKeys.size === 1 ? '' : 'es'} oculta${hiddenKeys.size === 1 ? '' : 's'}.</span>
+    <button class="btn btn-ghost" id="resetHiddenBtn">Volver a mostrar todas</button>`;
+  bar.querySelector('#resetHiddenBtn').addEventListener('click', resetHidden);
 }
 
 async function mergeIntoHistorial(parsed){
@@ -414,6 +474,7 @@ function renderOriginalViewer(mime, url){
 function jumpToPage(page){
   const embed = $('#pdfEmbed');
   if (!embed || !currentDocUrl) return;
+  activateTab('programa');
   $$('#viewToggle .vt-btn').forEach(b => b.classList.toggle('active', b.dataset.view === 'original'));
   $('#digitalView').hidden = true;
   $('#cuadranteViewer').hidden = false;
@@ -899,9 +960,17 @@ function renderDigitalView(parsed){
     return;
   }
 
-  if (parsed.tipo === 'entre-semana') {
+  const tipo = parsed.tipo;
+  const visibles = parsed.asignaciones.filter(a => !isHiddenKey(keyOf(a, tipo)));
+  if (visibles.length === 0) {
+    box.innerHTML = `<p class="empty-note">Has ocultado todas las asignaciones de este cuadrante.
+      Usa «Volver a mostrar todas» en la pestaña Cuadrante para recuperarlas.</p>`;
+    return;
+  }
+
+  if (tipo === 'entre-semana') {
     const porFecha = [];
-    parsed.asignaciones.forEach(a => {
+    visibles.forEach(a => {
       let grupo = porFecha.find(g => g.fecha === a.fecha);
       if (!grupo) { grupo = { fecha: a.fecha, lectura: a.lectura, filas: [] }; porFecha.push(grupo); }
       grupo.filas.push(a);
@@ -909,28 +978,39 @@ function renderDigitalView(parsed){
     box.innerHTML = porFecha.map(g => `
       <div class="digital-week">
         <h3>${escapeHtml(g.fecha)}${g.lectura ? ` · ${escapeHtml(g.lectura)}` : ''}</h3>
-        ${renderMidweekRows(g.filas)}
+        ${renderMidweekRows(g.filas, tipo)}
       </div>`).join('');
+  } else if (tipo === 'publica') {
+    box.innerHTML = visibles.map(a => {
+      const k = keyOf(a, tipo);
+      if (a.asamblea) {
+        return `<div class="digital-week"><h3>${escapeHtml(a.fecha)}${delBtn(k)}</h3>
+          <p class="empty-note">Asamblea — sin reunión pública.</p></div>`;
+      }
+      return `
+        <div class="digital-week">
+          <h3>${escapeHtml(a.fecha)}${delBtn(k)}</h3>
+          <div class="digital-row"><span class="dr-parte">Discurso</span><span class="dr-nombre">${escapeHtml(a.discursante || '')}</span></div>
+          ${a.tema ? `<div class="digital-row"><span class="dr-parte">Tema</span><span class="dr-nombre">${escapeHtml(a.tema)}</span></div>` : ''}
+          ${a.congregacion ? `<div class="digital-row"><span class="dr-parte">Congregación</span><span class="dr-nombre">${escapeHtml(a.congregacion)}</span></div>` : ''}
+          <div class="digital-row"><span class="dr-parte">Presidente</span><span class="dr-nombre">${escapeHtml(a.presidente || '')}</span></div>
+          <div class="digital-row"><span class="dr-parte">Lector de La Atalaya</span><span class="dr-nombre">${escapeHtml(a.lectorAtalaya || '')}</span></div>
+          <div class="digital-row"><span class="dr-parte">Oración de conclusión</span><span class="dr-nombre">${escapeHtml(a.oracionConclusion || '')}</span></div>
+        </div>`;
+    }).join('');
+  } else {
+    box.innerHTML = '';
     return;
   }
 
-  if (parsed.tipo === 'publica') {
-    box.innerHTML = parsed.asignaciones.map(a => a.asamblea ? `
-      <div class="digital-week"><h3>${escapeHtml(a.fecha)}</h3><p class="empty-note">Asamblea — sin reunión pública.</p></div>
-    ` : `
-      <div class="digital-week">
-        <h3>${escapeHtml(a.fecha)}</h3>
-        <div class="digital-row"><span class="dr-parte">Discurso</span><span class="dr-nombre">${escapeHtml(a.discursante || '')}</span></div>
-        ${a.tema ? `<div class="digital-row"><span class="dr-parte">Tema</span><span class="dr-nombre">${escapeHtml(a.tema)}</span></div>` : ''}
-        ${a.congregacion ? `<div class="digital-row"><span class="dr-parte">Congregación</span><span class="dr-nombre">${escapeHtml(a.congregacion)}</span></div>` : ''}
-        <div class="digital-row"><span class="dr-parte">Presidente</span><span class="dr-nombre">${escapeHtml(a.presidente || '')}</span></div>
-        <div class="digital-row"><span class="dr-parte">Lector de La Atalaya</span><span class="dr-nombre">${escapeHtml(a.lectorAtalaya || '')}</span></div>
-        <div class="digital-row"><span class="dr-parte">Oración de conclusión</span><span class="dr-nombre">${escapeHtml(a.oracionConclusion || '')}</span></div>
-      </div>`).join('');
-    return;
-  }
+  box.querySelectorAll('.dv-del').forEach(b => b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    hideAssignment(b.dataset.hk);
+  }));
+}
 
-  box.innerHTML = '';
+function delBtn(key){
+  return `<button class="dv-del" title="Ocultar esta asignación" data-hk="${escapeAttr(key)}">✕</button>`;
 }
 
 const SECTION_STYLE = {
@@ -940,7 +1020,7 @@ const SECTION_STYLE = {
   'vivamos como cristianos': { color: '#B4432D', bg: '#FBEAE5' },
 };
 
-function renderMidweekRows(filas){
+function renderMidweekRows(filas, tipo){
   let html = '';
   let lastSeccion; // undefined ≠ null: fuerza a pintar el primer grupo, incluso si es "sin sección"
   filas.forEach(f => {
@@ -956,6 +1036,7 @@ function renderMidweekRows(filas){
         <span class="dr-hora">${f.hora ? escapeHtml(f.hora) : ''}</span>
         <span class="dr-parte"><span class="dr-cat">${escapeHtml(categorizeMidweekRow(f))}</span>${escapeHtml(f.parte || '')}</span>
         <span class="dr-nombre">${f.rol ? `<em>${escapeHtml(f.rol)}</em>` : ''}${escapeHtml((f.nombres || []).join(' / '))}</span>
+        ${delBtn(keyOf(f, tipo))}
       </div>`;
   });
   return html;
@@ -995,9 +1076,10 @@ function categorizeMidweekRow(a){
 /* ---------- Localizar mi nombre en el historial registrado (no depende del documento actual) ---------- */
 const nameInput = $('#myNameInput');
 nameInput.value = localStorage.getItem('hg_myname') || '';
-nameInput.addEventListener('change', () => {
+nameInput.addEventListener('change', async () => {
   localStorage.setItem('hg_myname', nameInput.value.trim());
   renderNameMatches();
+  await syncMyAssignmentsToCalendar();
 });
 
 function findMyAssignments(historial, name){
@@ -1006,10 +1088,12 @@ function findMyAssignments(historial, name){
   const out = [];
 
   historial.forEach(a => {
+    const k = assignmentKey(a);
+    if (hiddenKeys.has(k)) return;
     if (a.tipo === 'entre-semana') {
       const nombres = a.nombres || [];
       if (nombres.some(n => normalizeText(n).includes(target))) {
-        out.push({ fecha: a.fecha, hora: a.hora || '', categoria: categorizeMidweekRow(a), nombreTexto: nombres.join(' / ') });
+        out.push({ _key: k, fecha: a.fecha, hora: a.hora || '', categoria: categorizeMidweekRow(a), nombreTexto: nombres.join(' / ') });
       }
     } else if (a.tipo === 'publica') {
       if (a.asamblea) return;
@@ -1019,7 +1103,7 @@ function findMyAssignments(historial, name){
       ];
       campos.forEach(([key, label]) => {
         if (a[key] && normalizeText(a[key]).includes(target)) {
-          out.push({ fecha: a.fecha, hora: '', categoria: label, nombreTexto: a[key] });
+          out.push({ _key: k, fecha: a.fecha, hora: '', categoria: label, nombreTexto: a[key] });
         }
       });
     }
@@ -1040,7 +1124,7 @@ function renderNameMatches(){
     return;
   }
   box.innerHTML = `
-    <p class="nm-status">Esto es lo que tienes:</p>
+    <p class="nm-status">Esto es lo que tienes (se añade solo al calendario):</p>
     <ul class="nm-cards">${matches.map(m => `
       <li>
         <div class="nm-top">
@@ -1048,7 +1132,12 @@ function renderNameMatches(){
           <span class="nm-pagesmall">${escapeHtml(m.fecha)}${m.hora ? ' · ' + escapeHtml(m.hora) : ''}</span>
         </div>
         <div class="nm-detalle">${highlightName(m.nombreTexto, name)}</div>
+        <button class="dv-del" title="Ocultar (también se quita del calendario)" data-hk="${escapeAttr(m._key)}">✕</button>
       </li>`).join('')}</ul>`;
+  box.querySelectorAll('.dv-del').forEach(b => b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    hideAssignment(b.dataset.hk);
+  }));
 }
 
 /* =========================================================
@@ -1066,6 +1155,73 @@ async function persistEvents(){
 }
 
 function eventsOn(dateStr){ return events.filter(e => e.date === dateStr); }
+
+/* ---------- Volcado automático de "mis asignaciones" al calendario ---------- */
+const MONTHS_ES = {
+  enero: 1, febrero: 2, marzo: 3, abril: 4, mayo: 5, junio: 6, julio: 7, agosto: 8,
+  septiembre: 9, setiembre: 9, octubre: 10, noviembre: 11, diciembre: 12,
+};
+
+/* Convierte la fecha de una asignación a ISO (YYYY-MM-DD).
+   Entre semana: "2026/10/14"   ·   Pública: "06 SEPTIEMBRE 2026" */
+function assignmentDateISO(fecha){
+  if (!fecha) return null;
+  let m = String(fecha).match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+  if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  m = String(fecha).match(/^(\d{1,2})\s+([A-Za-zÁÉÍÓÚÜÑáéíóúüñ.]+)\s+(\d{4})$/);
+  if (m) {
+    const mon = MONTHS_ES[normalizeText(m[2]).replace(/[^a-z]/g, '')];
+    if (mon) return `${m[3]}-${String(mon).padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+  }
+  return null;
+}
+
+function hashStr(s){
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+let autoSyncBusy = false;
+/* Regenera los eventos `auto:true` a partir de las asignaciones que coinciden con
+   "Mi nombre" y no están ocultas. Es un espejo: para quitar uno permanentemente,
+   se oculta la asignación (✕) en Cuadrante / Programa. */
+async function syncMyAssignmentsToCalendar(){
+  if (autoSyncBusy || !folderId) return;
+  const name = (nameInput.value || '').trim();
+
+  const prevAuto = JSON.stringify(events.filter(e => e.auto).map(e => e.id).sort());
+  const manuales = events.filter(e => !e.auto);
+  const autos = [];
+
+  if (name) {
+    findMyAssignments(currentHistorial, name).forEach(m => {
+      const date = assignmentDateISO(m.fecha);
+      if (!date) return;
+      const id = 'auto_' + hashStr(`${m._key}|${m.categoria}|${date}`);
+      if (autos.some(e => e.id === id)) return;
+      const time = /^\d{1,2}:\d{2}$/.test(m.hora || '') ? m.hora.replace(/^(\d):/, '0$1:') : '';
+      autos.push({
+        id, auto: true, srcKey: m._key,
+        title: m.categoria,
+        date, time,
+        notes: m.nombreTexto || '',
+        remind: false,
+      });
+    });
+  }
+
+  events = manuales.concat(autos);
+  const nextAuto = JSON.stringify(autos.map(e => e.id).sort());
+  if (prevAuto !== nextAuto) {
+    autoSyncBusy = true;
+    try { await persistEvents(); }
+    catch (e) { console.error(e); }
+    finally { autoSyncBusy = false; }
+  }
+  renderCalendar();
+  renderUpcoming();
+}
 
 function renderCalendar(){
   const grid = $('#calGrid');
@@ -1122,15 +1278,16 @@ function renderUpcoming(){
   }
   upcoming.forEach(ev => {
     const li = document.createElement('li');
+    if (ev.auto) li.className = 'ev-auto';
     const d = new Date(`${ev.date}T${ev.time || '00:00'}`);
     const dateLabel = d.toLocaleDateString('es-ES', { day: '2-digit', month: 'short' }) + (ev.time ? ` · ${ev.time}` : '');
     li.innerHTML = `
       <span class="ev-date">${dateLabel}</span>
-      <span class="ev-title">${escapeHtml(ev.title)}</span>
+      <span class="ev-title">${ev.auto ? '📋 ' : ''}${escapeHtml(ev.title)}${ev.auto && ev.notes ? ` <em>· ${escapeHtml(ev.notes)}</em>` : ''}</span>
       <span class="ev-actions">
-        <button class="icon-btn" title="Añadir a mi calendario" data-ics="${ev.id}">⇩</button>
-        <button class="icon-btn" title="Editar" data-edit="${ev.id}">✎</button>
-        <button class="icon-btn" title="Eliminar" data-del="${ev.id}">✕</button>
+        <button class="icon-btn" title="Descargar .ics" data-ics="${ev.id}">⇩</button>
+        ${ev.auto ? '' : `<button class="icon-btn" title="Editar" data-edit="${ev.id}">✎</button>`}
+        <button class="icon-btn" title="${ev.auto ? 'Ocultar esta asignación' : 'Eliminar'}" data-del="${ev.id}">✕</button>
       </span>`;
     list.appendChild(li);
   });
@@ -1145,10 +1302,10 @@ function openDayModal(dateStr){
   const niceDate = new Date(`${dateStr}T00:00`).toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' });
   const rows = dayEvents.map(ev => `
     <div class="parte-row">
-      <span>${ev.time ? ev.time + ' · ' : ''}${escapeHtml(ev.title)}</span>
+      <span>${ev.time ? ev.time + ' · ' : ''}${ev.auto ? '📋 ' : ''}${escapeHtml(ev.title)}</span>
       <span class="ev-actions">
-        <button class="icon-btn" data-edit="${ev.id}">✎</button>
-        <button class="icon-btn" data-del="${ev.id}">✕</button>
+        ${ev.auto ? '' : `<button class="icon-btn" data-edit="${ev.id}">✎</button>`}
+        <button class="icon-btn" title="${ev.auto ? 'Ocultar asignación' : 'Eliminar'}" data-del="${ev.id}">✕</button>
       </span>
     </div>`).join('') || '<p class="empty-note">Sin eventos este día.</p>';
 
@@ -1207,6 +1364,8 @@ function openEventModal(id, presetDate){
 }
 
 async function deleteEvent(id){
+  const ev = events.find(e => e.id === id);
+  if (ev && ev.auto) { await hideAssignment(ev.srcKey); return; } // auto = espejo de una asignación
   events = events.filter(e => e.id !== id);
   showSand('Guardando en Drive…');
   try { await persistEvents(); renderCalendar(); renderUpcoming(); }
