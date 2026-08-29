@@ -6,12 +6,14 @@ const CONFIG = {
   CLIENT_ID: '989709837307-449de0hk767r7lplvjfc4ilfb6smnpfd.apps.googleusercontent.com',
   SCOPES: 'https://www.googleapis.com/auth/drive.file',
   FOLDER_NAME: 'Hourglass Panel',
-  CUADRANTE_PREFIX: 'cuadrante-actual',
-  ASIGNACIONES_NAME: 'asignaciones.json',
+  CUADRANTE_PREFIX: 'cuadrante-actual',   // solo para migrar cuadrantes antiguos
+  ASIGNACIONES_NAME: 'asignaciones.json', // idem
+  CUADRANTES_INDEX: 'cuadrantes.json',    // índice del historial de cuadrantes
   HISTORIAL_NAME: 'historial-asignaciones.json',
   OCULTAS_NAME: 'asignaciones-ocultas.json',
   EVENTS_NAME: 'eventos.json',
   PROYECTOS_NAME: 'proyectos.json',
+  MINISTERIO_NAME: 'ministerio.json',
 };
 
 /* =========================================================
@@ -20,7 +22,10 @@ const CONFIG = {
 let tokenClient, accessToken = null, folderId = null;
 let events = [];
 let proyectos = [];
+let ministerio = [];          // [{ id, date, minutes, note }]
 let hiddenKeys = new Set();   // claves de asignaciones ocultadas por el usuario
+let cuadrantesIdx = [];       // [{ id, uploaded, mime, ext, tipo, docName, parseName }] (recientes primero)
+let currentCuadranteId = null;
 let calMonth = new Date(calYearMonthStart());
 let notifiedIds = new Set(JSON.parse(localStorage.getItem('hg_notified') || '[]'));
 
@@ -86,16 +91,21 @@ async function onSignedIn(){
   showSand('Preparando tu carpeta en Drive…');
   try {
     await ensureFolder();
-    await loadHistorial(); // primero, para que loadCuadrante pueda fusionar sin condición de carrera
+    await loadHistorial(); // primero, para que openCuadrante pueda fusionar sin condición de carrera
     await loadHidden();
-    await loadEvents();     // antes de loadCuadrante: su sync al calendario necesita los eventos ya cargados
-    await Promise.all([loadProyectos(), loadCuadrante()]);
+    await loadEvents();     // antes de openCuadrante: su sync al calendario necesita los eventos ya cargados
+    await loadMinisterio();
+    await loadCuadrantesIndex();
+    await Promise.all([loadProyectos(), openCuadrante()]);
     renderNameMatches();
     updateHiddenBar();
+    renderCuadranteHistory();
     await syncMyAssignmentsToCalendar(); // vuelca mis asignaciones al calendario
     renderCalendar();
     renderUpcoming();
     renderProyectos();
+    renderMinisterio();
+    renderDashboard();
     checkReminders();
     setInterval(checkReminders, 60000);
   } catch (err) {
@@ -235,8 +245,25 @@ async function ensureFolder(){
 }
 
 /* =========================================================
-   Cuadrante — subida (PDF o imagen)
+   Cuadrantes — subida e historial (PDF o imagen)
+   Cada subida se guarda como cuadrante-<sello>.<ext> + asignaciones-<sello>.json
+   y se registra en cuadrantes.json. No se borra ninguno automáticamente.
    ========================================================= */
+let currentDocBlob = null;
+let currentDocUrl = null;
+let currentDocMime = null;
+let currentParsed = null; // { tipo, asignaciones: [...] }
+
+function nowStamp(){
+  const d = new Date(), p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+function tipoLabel(t){
+  return t === 'entre-semana' ? 'Entre semana'
+    : t === 'publica' ? 'Reunión pública'
+    : 'Documento';
+}
+
 $('#pdfInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
@@ -248,25 +275,37 @@ $('#pdfInput').addEventListener('change', async (e) => {
   try {
     const ext = isPdf ? 'pdf' : (file.name.split('.').pop() || 'jpg').toLowerCase();
     const mime = isPdf ? 'application/pdf' : file.type;
-    const targetName = `${CONFIG.CUADRANTE_PREFIX}.${ext}`;
+    const stamp = nowStamp();
+    const docName = `cuadrante-${stamp}.${ext}`;
+    const parseName = `asignaciones-${stamp}.json`;
 
-    // Localiza los cuadrantes existentes UNA sola vez. Reutiliza en sitio el que ya
-    // tenga el nombre correcto y borra el resto DESPUÉS de escribir: así no dependemos
-    // del índice de búsqueda de Drive (eventualmente consistente) justo tras un borrado,
-    // que es lo que hacía que la 2ª subida fallara y se perdiera también la anterior.
-    const existing = await findFilesByPrefix(CONFIG.CUADRANTE_PREFIX, folderId);
-    let target = existing.find(f => f.name === targetName) || null;
-    if (!target) target = await createFileMeta(targetName, folderId, mime);
-    await updateFileContent(target.id, mime, file);
+    const meta = await createFileMeta(docName, folderId, mime);
+    await updateFileContent(meta.id, mime, file);
 
-    for (const f of existing) {
-      if (f.id !== target.id) { try { await deleteFile(f.id); } catch (_) { /* ya no está */ } }
-    }
+    // muestra ya el original mientras se analiza
+    if (currentDocUrl) URL.revokeObjectURL(currentDocUrl);
+    currentDocBlob = file; currentDocMime = mime;
+    currentDocUrl = URL.createObjectURL(file);
+    renderOriginalViewer(currentDocMime, currentDocUrl);
+    $('#viewToggle').hidden = false;
 
-    await loadCuadrante({
-      forceReparse: true,
-      file: { id: target.id, mimeType: mime, modifiedTime: new Date().toISOString() },
-    });
+    currentParsed = await parseBlob(file, mime);
+    await saveFile(parseName, 'application/json', JSON.stringify(currentParsed, null, 2), folderId);
+    await mergeIntoHistorial(currentParsed);
+
+    const entry = { id: stamp, uploaded: new Date().toISOString(), mime, ext, tipo: currentParsed.tipo, docName, parseName };
+    cuadrantesIdx.unshift(entry);
+    await persistCuadrantesIndex();
+    currentCuadranteId = stamp;
+
+    $('#cuadranteMeta').textContent = `${tipoLabel(currentParsed.tipo)} · subido hoy`;
+    { const gp = document.getElementById('goProgramaBtn'); if (gp) gp.hidden = false; }
+    renderCuadranteHistory();
+    renderDigitalView(currentParsed);
+    renderNameMatches();
+    updateHiddenBar();
+    await syncMyAssignmentsToCalendar();
+    renderDashboard();
   } catch (err) {
     console.error(err);
     showError('No se pudo subir el archivo.');
@@ -276,66 +315,8 @@ $('#pdfInput').addEventListener('change', async (e) => {
   }
 });
 
-let currentDocBlob = null;
-let currentDocUrl = null;
-let currentDocMime = null;
-let currentParsed = null; // { tipo, asignaciones: [...] }
-
-async function loadCuadrante({ forceReparse = false, file = null } = {}){
-  let f = file;
-  if (!f) {
-    const files = await findFilesByPrefix(CONFIG.CUADRANTE_PREFIX, folderId);
-    f = files[0] || null;
-  }
-  const meta = $('#cuadranteMeta');
-  const toggle = $('#viewToggle');
-
-  if (!f) {
-    currentDocBlob = null; currentParsed = null;
-    toggle.hidden = true;
-    setOriginalViewerEmpty();
-    $('#digitalView').innerHTML = '';
-    meta.textContent = '';
-    const gp = document.getElementById('goProgramaBtn');
-    if (gp) gp.hidden = true;
-    renderNameMatches();
-    return;
-  }
-  { const gp = document.getElementById('goProgramaBtn'); if (gp) gp.hidden = false; }
-
-  const res = await downloadFile(f.id);
-  const blob = await res.blob();
-  currentDocBlob = blob;
-  currentDocMime = f.mimeType;
-  currentDocUrl = URL.createObjectURL(blob);
-  renderOriginalViewer(currentDocMime, currentDocUrl);
-
-  const d = new Date(f.modifiedTime);
-  meta.textContent = `Subido el ${d.toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' })}`;
-
-  toggle.hidden = false;
-
-  // Reutiliza el análisis ya guardado si el archivo no ha cambiado
-  if (!forceReparse) {
-    const cached = await findFile(CONFIG.ASIGNACIONES_NAME, folderId, 'application/json');
-    if (cached) {
-      try {
-        const r = await downloadFile(cached.id);
-        currentParsed = await r.json();
-        await mergeIntoHistorial(currentParsed); // por si el historial aún no lo tenía (p. ej. tras esta actualización)
-        renderDigitalView(currentParsed);
-        renderNameMatches();
-        updateHiddenBar();
-        await syncMyAssignmentsToCalendar();
-        return;
-      } catch (e) { /* si falla, se reanaliza abajo */ }
-    }
-  }
-
-  await analyzeCuadrante(blob, f.mimeType);
-}
-
-async function analyzeCuadrante(blob, mime){
+/* Analiza un blob (PDF/imagen) y devuelve { tipo, asignaciones }. Nunca lanza. */
+async function parseBlob(blob, mime){
   showSand(mime === 'application/pdf' ? 'Leyendo el PDF…' : 'Reconociendo el texto de la imagen (OCR)…');
   try {
     const pages = mime === 'application/pdf'
@@ -343,25 +324,169 @@ async function analyzeCuadrante(blob, mime){
       : await extractPagesFromImage(blob, (m) => {
           if (m.status === 'recognizing text') showSand(`Reconociendo texto… ${Math.round((m.progress || 0) * 100)}%`);
         });
-    currentParsed = parseCuadrante(pages);
-    await saveFile(CONFIG.ASIGNACIONES_NAME, 'application/json', JSON.stringify(currentParsed, null, 2), folderId);
-    await mergeIntoHistorial(currentParsed);
+    return parseCuadrante(pages);
   } catch (err) {
     console.error(err);
-    currentParsed = { tipo: 'desconocido', asignaciones: [], error: true };
-    // Persiste también el estado de error para que una recarga posterior no reutilice
-    // el análisis (cacheado) del cuadrante anterior como si fuera el de este.
-    try {
-      await saveFile(CONFIG.ASIGNACIONES_NAME, 'application/json', JSON.stringify(currentParsed, null, 2), folderId);
-    } catch (_) { /* no crítico */ }
     showError('No se pudo digitalizar el documento; puedes seguir consultando el original.');
+    return { tipo: 'desconocido', asignaciones: [], error: true };
   } finally {
     hideSand();
   }
-  renderDigitalView(currentParsed);
+}
+
+async function persistCuadrantesIndex(){
+  await saveFile(CONFIG.CUADRANTES_INDEX, 'application/json', JSON.stringify(cuadrantesIdx, null, 2), folderId);
+}
+
+/* Carga el índice; si no existe, migra los cuadrantes del formato antiguo. */
+async function loadCuadrantesIndex(){
+  const f = await findFile(CONFIG.CUADRANTES_INDEX, folderId, 'application/json');
+  if (f) {
+    try {
+      const r = await downloadFile(f.id);
+      cuadrantesIdx = (await r.json()) || [];
+    } catch (e) { cuadrantesIdx = []; }
+  } else {
+    cuadrantesIdx = [];
+    const legacy = await findFilesByPrefix(CONFIG.CUADRANTE_PREFIX, folderId);
+    if (legacy.length) {
+      const oldParse = await findFile(CONFIG.ASIGNACIONES_NAME, folderId, 'application/json');
+      legacy
+        .sort((a, b) => (b.modifiedTime || '').localeCompare(a.modifiedTime || ''))
+        .forEach((lf, i) => {
+          cuadrantesIdx.push({
+            id: 'legacy-' + i,
+            uploaded: lf.modifiedTime || new Date().toISOString(),
+            mime: lf.mimeType || (/\.pdf$/i.test(lf.name) ? 'application/pdf' : 'image/*'),
+            ext: (lf.name.split('.').pop() || 'pdf').toLowerCase(),
+            tipo: '?',
+            docName: lf.name,
+            parseName: (i === 0 && oldParse) ? CONFIG.ASIGNACIONES_NAME : null,
+          });
+        });
+      try { await persistCuadrantesIndex(); } catch (e) { /* no crítico */ }
+    }
+  }
+  cuadrantesIdx.sort((a, b) => (b.uploaded || '').localeCompare(a.uploaded || ''));
+}
+
+/* Abre un cuadrante del historial (o el más reciente si no se indica id). */
+async function openCuadrante(id){
+  const entry = (id && cuadrantesIdx.find(c => c.id === id)) || cuadrantesIdx[0] || null;
+  const meta = $('#cuadranteMeta');
+  const toggle = $('#viewToggle');
+  const gp = document.getElementById('goProgramaBtn');
+
+  if (!entry) {
+    currentCuadranteId = null; currentDocBlob = null; currentParsed = null;
+    toggle.hidden = true;
+    setOriginalViewerEmpty();
+    $('#digitalView').innerHTML = '';
+    meta.textContent = '';
+    if (gp) gp.hidden = true;
+    renderCuadranteHistory();
+    renderDigitalView(null);
+    renderNameMatches();
+    return;
+  }
+  currentCuadranteId = entry.id;
+
+  const docFile = await findFile(entry.docName, folderId);
+  if (!docFile) { showError('No se encontró el archivo de este cuadrante en Drive.'); return; }
+  const blob = await (await downloadFile(docFile.id)).blob();
+  if (currentDocUrl) URL.revokeObjectURL(currentDocUrl);
+  currentDocBlob = blob;
+  currentDocMime = entry.mime && entry.mime !== 'image/*' ? entry.mime : blob.type;
+  currentDocUrl = URL.createObjectURL(blob);
+  renderOriginalViewer(currentDocMime, currentDocUrl);
+  toggle.hidden = false;
+  if (gp) gp.hidden = false;
+
+  const d = new Date(entry.uploaded);
+  meta.textContent = `${tipoLabel(entry.tipo)} · subido el ${d.toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' })}`;
+
+  let parsed = null;
+  if (entry.parseName) {
+    const pf = await findFile(entry.parseName, folderId, 'application/json');
+    if (pf) { try { parsed = await (await downloadFile(pf.id)).json(); } catch (e) { parsed = null; } }
+  }
+  if (!parsed) {
+    parsed = await parseBlob(blob, currentDocMime);
+    const pn = entry.parseName || `asignaciones-${entry.id}.json`;
+    entry.parseName = pn;
+    try { await saveFile(pn, 'application/json', JSON.stringify(parsed, null, 2), folderId); } catch (e) { /* no crítico */ }
+  }
+  currentParsed = parsed;
+
+  if (entry.tipo === '?' && parsed.tipo && parsed.tipo !== 'desconocido') {
+    entry.tipo = parsed.tipo;
+    try { await persistCuadrantesIndex(); } catch (e) { /* no crítico */ }
+  }
+
+  await mergeIntoHistorial(parsed);
+  renderCuadranteHistory();
+  renderDigitalView(parsed);
   renderNameMatches();
   updateHiddenBar();
   await syncMyAssignmentsToCalendar();
+  renderDashboard();
+}
+
+async function deleteCuadrante(id){
+  const entry = cuadrantesIdx.find(c => c.id === id);
+  if (!entry) return;
+  const d = new Date(entry.uploaded).toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' });
+  renderModal(`
+    <h3>Borrar cuadrante</h3>
+    <p>Se eliminará el documento de <strong>${escapeHtml(d)}</strong> (${escapeHtml(tipoLabel(entry.tipo))}).
+    Las asignaciones que ya se registraron se conservan en tu historial.</p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="modalCancel">Cancelar</button>
+      <button class="btn btn-primary" id="modalConfirm" style="background:#B4432D; color:#FFF5EF;">Borrar</button>
+    </div>`);
+  $('#modalCancel').addEventListener('click', closeModal);
+  $('#modalConfirm').addEventListener('click', async () => {
+    closeModal();
+    showSand('Borrando…');
+    try {
+      for (const nm of [entry.docName, entry.parseName]) {
+        if (!nm) continue;
+        const ff = await findFile(nm, folderId);
+        if (ff) { try { await deleteFile(ff.id); } catch (_) {} }
+      }
+      cuadrantesIdx = cuadrantesIdx.filter(c => c.id !== id);
+      await persistCuadrantesIndex();
+      if (currentCuadranteId === id) await openCuadrante();
+      else { renderCuadranteHistory(); renderDashboard(); }
+    } catch (err) {
+      console.error(err);
+      showError('No se pudo borrar el cuadrante.');
+    } finally { hideSand(); }
+  });
+}
+
+function renderCuadranteHistory(){
+  const box = document.getElementById('cuadranteHistory');
+  if (!box) return;
+  if (!cuadrantesIdx.length) { box.hidden = true; box.innerHTML = ''; return; }
+  box.hidden = false;
+  box.innerHTML = `<span class="ch-label">Cuadrantes guardados</span>
+    <div class="ch-list">${cuadrantesIdx.map(c => {
+      const d = new Date(c.uploaded).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' });
+      return `<div class="ch-item${c.id === currentCuadranteId ? ' active' : ''}" data-open="${escapeAttr(c.id)}">
+        <span class="ch-date">${escapeHtml(d)}</span>
+        <span class="ch-tipo">${escapeHtml(tipoLabel(c.tipo))}</span>
+        <button class="ch-del" title="Borrar" data-del="${escapeAttr(c.id)}">🗑</button>
+      </div>`;
+    }).join('')}</div>`;
+  box.querySelectorAll('.ch-item').forEach(el => el.addEventListener('click', (e) => {
+    if (e.target.closest('.ch-del')) return;
+    openCuadrante(el.dataset.open);
+  }));
+  box.querySelectorAll('.ch-del').forEach(b => b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    deleteCuadrante(b.dataset.del);
+  }));
 }
 
 /* ---------- Historial de asignaciones (persiste aunque se reemplace el cuadrante) ---------- */
@@ -1080,6 +1205,7 @@ nameInput.addEventListener('change', async () => {
   localStorage.setItem('hg_myname', nameInput.value.trim());
   renderNameMatches();
   await syncMyAssignmentsToCalendar();
+  renderDashboard();
 });
 
 function findMyAssignments(historial, name){
@@ -1274,6 +1400,7 @@ function renderUpcoming(){
   list.innerHTML = '';
   if (upcoming.length === 0) {
     list.innerHTML = '<li class="empty-note" style="list-style:none;">Sin eventos próximos.</li>';
+    renderDashboard();
     return;
   }
   upcoming.forEach(ev => {
@@ -1295,6 +1422,7 @@ function renderUpcoming(){
   list.querySelectorAll('[data-ics]').forEach(b => b.addEventListener('click', () => downloadIcs(b.dataset.ics)));
   list.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => openEventModal(b.dataset.edit)));
   list.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => deleteEvent(b.dataset.del)));
+  renderDashboard();
 }
 
 function openDayModal(dateStr){
@@ -1432,6 +1560,7 @@ function renderProyectos(){
   const wrap = $('#proyectosList');
   if (proyectos.length === 0) {
     wrap.innerHTML = '<p class="empty-note">Todavía no has creado ningún proyecto de reunión.</p>';
+    renderDashboard();
     return;
   }
   wrap.innerHTML = proyectos
@@ -1450,6 +1579,7 @@ function renderProyectos(){
 
   wrap.querySelectorAll('[data-edit-p]').forEach(b => b.addEventListener('click', () => openProyectoModal(b.dataset.editP)));
   wrap.querySelectorAll('[data-del-p]').forEach(b => b.addEventListener('click', () => deleteProyecto(b.dataset.delP)));
+  renderDashboard();
 }
 
 $('#addProyectoBtn').addEventListener('click', () => openProyectoModal());
@@ -1523,6 +1653,212 @@ async function deleteProyecto(id){
   showSand('Guardando en Drive…');
   try { await persistProyectos(); renderProyectos(); }
   finally { hideSand(); }
+}
+
+/* =========================================================
+   Ministerio — registro de horas de predicación
+   ========================================================= */
+async function loadMinisterio(){
+  const f = await findFile(CONFIG.MINISTERIO_NAME, folderId, 'application/json');
+  if (!f) { ministerio = []; return; }
+  try { ministerio = (await (await downloadFile(f.id)).json()) || []; }
+  catch (e) { ministerio = []; }
+}
+async function persistMinisterio(){
+  await saveFile(CONFIG.MINISTERIO_NAME, 'application/json', JSON.stringify(ministerio, null, 2), folderId);
+}
+
+function fmtDur(min){
+  min = Math.max(0, Math.round(min || 0));
+  const h = Math.floor(min / 60), m = min % 60;
+  if (h && m) return `${h} h ${m} min`;
+  if (h) return `${h} h`;
+  return `${m} min`;
+}
+/* Año de servicio: 1 sep – 31 ago */
+function serviceYearStart(ref){
+  const d = ref ? new Date(ref) : new Date();
+  const y = d.getMonth() >= 8 ? d.getFullYear() : d.getFullYear() - 1;
+  return new Date(y, 8, 1);
+}
+function ministerioTotals(){
+  const now = new Date();
+  const mesKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const syStart = serviceYearStart(now);
+  let mes = 0, mesN = 0, sy = 0;
+  ministerio.forEach(s => {
+    const min = Number(s.minutes) || 0;
+    if ((s.date || '').slice(0, 7) === mesKey) { mes += min; mesN++; }
+    if (s.date && new Date(s.date + 'T00:00') >= syStart) sy += min;
+  });
+  return { mes, mesN, sy };
+}
+
+function renderMinisterio(){
+  const stats = document.getElementById('ministerioStats');
+  const list = document.getElementById('ministerioList');
+  if (!stats || !list) return;
+  const t = ministerioTotals();
+  stats.innerHTML = `
+    <div class="min-stat"><span class="ms-num">${fmtDur(t.mes)}</span><span class="ms-lbl">Este mes · ${t.mesN} salida${t.mesN === 1 ? '' : 's'}</span></div>
+    <div class="min-stat"><span class="ms-num">${fmtDur(t.sy)}</span><span class="ms-lbl">Año de servicio</span></div>`;
+
+  if (!ministerio.length) {
+    list.innerHTML = '<p class="empty-note">Aún no has registrado ninguna salida. Usa «+ Añadir salida».</p>';
+    renderDashboard();
+    return;
+  }
+  const byMonth = [];
+  ministerio.slice().sort((a, b) => (b.date || '').localeCompare(a.date || '')).forEach(s => {
+    const k = (s.date || '').slice(0, 7);
+    let g = byMonth.find(x => x.k === k);
+    if (!g) { g = { k, total: 0, items: [] }; byMonth.push(g); }
+    g.total += Number(s.minutes) || 0;
+    g.items.push(s);
+  });
+  list.innerHTML = byMonth.map(g => {
+    const [y, m] = g.k.split('-');
+    const title = new Date(+y, (+m || 1) - 1, 1).toLocaleDateString('es-ES', { month: 'long', year: 'numeric' });
+    return `<div class="min-month">
+      <div class="mm-head"><span style="text-transform:capitalize">${escapeHtml(title)}</span><span>${fmtDur(g.total)}</span></div>
+      ${g.items.map(s => `
+        <div class="parte-row">
+          <span>${escapeHtml(new Date((s.date || '') + 'T00:00').toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' }))}
+            · <strong>${fmtDur(s.minutes)}</strong>${s.note ? ' · ' + escapeHtml(s.note) : ''}</span>
+          <span class="ev-actions">
+            <button class="icon-btn" data-edit-m="${escapeAttr(s.id)}">✎</button>
+            <button class="icon-btn" data-del-m="${escapeAttr(s.id)}">✕</button>
+          </span>
+        </div>`).join('')}
+    </div>`;
+  }).join('');
+  list.querySelectorAll('[data-edit-m]').forEach(b => b.addEventListener('click', () => openMinisterioModal(b.dataset.editM)));
+  list.querySelectorAll('[data-del-m]').forEach(b => b.addEventListener('click', () => deleteMinisterioSesion(b.dataset.delM)));
+  renderDashboard();
+}
+
+document.getElementById('addMinisterioBtn').addEventListener('click', () => openMinisterioModal());
+
+function openMinisterioModal(id){
+  const s = id ? ministerio.find(x => x.id === id) : null;
+  const h = s ? Math.floor((s.minutes || 0) / 60) : '';
+  const mm = s ? (s.minutes || 0) % 60 : '';
+  renderModal(`
+    <h3>${s ? 'Editar salida' : 'Añadir salida'}</h3>
+    <div class="field"><label>Fecha</label><input id="mDate" type="date" value="${s ? s.date : new Date().toISOString().slice(0, 10)}"></div>
+    <div class="field" style="flex-direction:row; gap:10px;">
+      <div style="flex:1; display:flex; flex-direction:column; gap:5px;"><label>Horas</label><input id="mH" type="number" min="0" max="24" value="${h}"></div>
+      <div style="flex:1; display:flex; flex-direction:column; gap:5px;"><label>Minutos</label><input id="mM" type="number" min="0" max="59" value="${mm}"></div>
+    </div>
+    <div class="field"><label>Nota (opcional)</label><input id="mNote" value="${s ? escapeAttr(s.note || '') : ''}" placeholder="territorio, con quién…"></div>
+    <div class="modal-actions">
+      ${s ? '<button class="btn btn-ghost" id="modalDelete" style="color:#B4432D;">Eliminar</button>' : ''}
+      <button class="btn btn-ghost" id="modalCancel">Cancelar</button>
+      <button class="btn btn-primary" id="modalSave">Guardar</button>
+    </div>`);
+  $('#modalCancel').addEventListener('click', closeModal);
+  if (s) $('#modalDelete').addEventListener('click', () => { deleteMinisterioSesion(s.id); closeModal(); });
+  $('#modalSave').addEventListener('click', async () => {
+    const date = $('#mDate').value;
+    const minutes = (parseInt($('#mH').value, 10) || 0) * 60 + (parseInt($('#mM').value, 10) || 0);
+    if (!date || minutes <= 0) { showError('Indica la fecha y una duración mayor que cero.'); return; }
+    const data = { id: s ? s.id : 'm_' + Date.now(), date, minutes, note: $('#mNote').value.trim() };
+    if (s) Object.assign(s, data); else ministerio.push(data);
+    closeModal();
+    showSand('Guardando en Drive…');
+    try { await persistMinisterio(); renderMinisterio(); } finally { hideSand(); }
+  });
+}
+
+async function deleteMinisterioSesion(id){
+  ministerio = ministerio.filter(s => s.id !== id);
+  showSand('Guardando en Drive…');
+  try { await persistMinisterio(); renderMinisterio(); } finally { hideSand(); }
+}
+
+/* =========================================================
+   Dashboard (pestaña Inicio)
+   ========================================================= */
+function todayISO(){ return new Date().toISOString().slice(0, 10); }
+
+/* Reuniones deducidas de las fechas de los cuadrantes ya registrados. */
+function deriveMeetings(){
+  const seen = new Set(), out = [];
+  (currentHistorial || []).forEach(a => {
+    const iso = assignmentDateISO(a.fecha);
+    if (!iso) return;
+    const kind = a.tipo === 'publica' ? 'fs' : 'es';
+    if (seen.has(iso + kind)) return;
+    seen.add(iso + kind);
+    out.push({ iso, kind, label: kind === 'fs' ? 'Reunión pública' : 'Reunión de entre semana' });
+  });
+  return out;
+}
+
+function renderDashboard(){
+  const box = document.getElementById('dashboard');
+  if (!box) return;
+  const today = todayISO();
+  const name = (nameInput.value || '').trim();
+
+  const meetings = deriveMeetings()
+    .concat(events.filter(e => !e.auto).map(e => ({ iso: e.date, kind: 'ev', label: e.title, time: e.time })))
+    .filter(m => m.iso && m.iso >= today)
+    .sort((a, b) => (a.iso + (a.time || '')).localeCompare(b.iso + (b.time || '')))
+    .slice(0, 6);
+
+  const mine = findMyAssignments(currentHistorial, name)
+    .map(m => ({ ...m, iso: assignmentDateISO(m.fecha) }))
+    .filter(m => m.iso && m.iso >= today)
+    .sort((a, b) => a.iso.localeCompare(b.iso))
+    .slice(0, 6);
+
+  const t = ministerioTotals();
+  const proxProyecto = proyectos.slice()
+    .filter(p => p.fecha && p.fecha >= today)
+    .sort((a, b) => a.fecha.localeCompare(b.fecha))[0];
+
+  const fD = (iso, opts) => escapeHtml(new Date(iso + 'T00:00').toLocaleDateString('es-ES', opts));
+  const card = (title, body, tab) => `
+    <div class="dash-card"${tab ? ` data-goto="${tab}"` : ''}>
+      <h3>${title}</h3>${body}
+    </div>`;
+
+  box.innerHTML =
+    card('Mis próximas responsabilidades',
+      mine.length
+        ? `<ul class="dash-lines">${mine.map(m => `<li>
+            <span class="dl-date">${fD(m.iso, { day: '2-digit', month: 'short' })}${m.hora ? ' · ' + escapeHtml(m.hora) : ''}</span>
+            <span class="dl-main">${escapeHtml(m.categoria)}</span></li>`).join('')}</ul>`
+        : `<p class="empty-note">${name ? 'Sin asignaciones futuras registradas.' : 'Escribe tu nombre en la pestaña Cuadrante para verlas aquí.'}</p>`,
+      'cuadrante') +
+
+    card('Próximas reuniones',
+      meetings.length
+        ? `<ul class="dash-lines">${meetings.map(m => `<li>
+            <span class="dl-date">${fD(m.iso, { weekday: 'short', day: '2-digit', month: 'short' })}${m.time ? ' · ' + escapeHtml(m.time) : ''}</span>
+            <span class="dl-main">${escapeHtml(m.label)}</span></li>`).join('')}</ul>`
+        : '<p class="empty-note">Sube un cuadrante o añade eventos para ver aquí las reuniones.</p>',
+      'calendario') +
+
+    card('Ministerio este mes',
+      `<p class="dash-big">${fmtDur(t.mes)}</p>
+       <p class="empty-note">${t.mesN} salida${t.mesN === 1 ? '' : 's'} · Año de servicio: ${fmtDur(t.sy)}</p>`,
+      'ministerio') +
+
+    card('Proyectos',
+      proxProyecto
+        ? `<p class="dash-big">${escapeHtml(proxProyecto.titulo)}</p>
+           <p class="empty-note">${fD(proxProyecto.fecha, { day: 'numeric', month: 'long' })} · ${proyectos.length} en total</p>`
+        : `<p class="empty-note">${proyectos.length ? proyectos.length + ' proyecto(s), ninguno con fecha futura.' : 'Sin proyectos.'}</p>`,
+      'proyectos') +
+
+    card('Guardado',
+      `<p class="empty-note">${cuadrantesIdx.length} cuadrante${cuadrantesIdx.length === 1 ? '' : 's'} guardado${cuadrantesIdx.length === 1 ? '' : 's'} ·
+        ${(currentHistorial || []).length} asignaciones registradas</p>`,
+      'programa');
+
+  box.querySelectorAll('[data-goto]').forEach(el => el.addEventListener('click', () => activateTab(el.dataset.goto)));
 }
 
 /* =========================================================
