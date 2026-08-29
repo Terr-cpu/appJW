@@ -14,6 +14,7 @@ const CONFIG = {
   EVENTS_NAME: 'eventos.json',
   PROYECTOS_NAME: 'proyectos.json',
   MINISTERIO_NAME: 'ministerio.json',
+  TAREAS_NAME: 'tareas.json',
 };
 
 /* =========================================================
@@ -23,6 +24,9 @@ let tokenClient, accessToken = null, folderId = null;
 let events = [];
 let proyectos = [];
 let ministerio = [];          // [{ id, date, minutes, note }]
+let tareas = [];              // [{ id, title, done, doneAt, due, time, priority, project, labels[], notes, subtasks[], createdAt }]
+let tareasView = 'hoy';       // hoy | proximo | todas | hechas
+let tareasFilter = { project: '', label: '' };
 let hiddenKeys = new Set();   // claves de asignaciones ocultadas por el usuario
 let cuadrantesIdx = [];       // [{ id, uploaded, mime, ext, tipo, docName, parseName }] (recientes primero)
 let currentCuadranteId = null;
@@ -95,6 +99,7 @@ async function onSignedIn(){
     await loadHidden();
     await loadEvents();     // antes de openCuadrante: su sync al calendario necesita los eventos ya cargados
     await loadMinisterio();
+    await loadTareas();
     await loadCuadrantesIndex();
     await Promise.all([loadProyectos(), openCuadrante()]);
     renderNameMatches();
@@ -105,7 +110,9 @@ async function onSignedIn(){
     renderUpcoming();
     renderProyectos();
     renderMinisterio();
+    renderTareas();
     renderDashboard();
+    handleLaunchParams();
     checkReminders();
     setInterval(checkReminders, 60000);
   } catch (err) {
@@ -114,6 +121,15 @@ async function onSignedIn(){
   } finally {
     hideSand();
   }
+}
+
+/* Accesos directos del icono / widgets: index.html?go=<pestaña>&nueva=1 */
+function handleLaunchParams(){
+  const q = new URLSearchParams(location.search);
+  const go = q.get('go');
+  if (go && document.getElementById('tab-' + go)) activateTab(go);
+  if (q.get('nueva') === '1' && go === 'tareas') setTimeout(() => openTareaModal(), 200);
+  if (go || q.get('nueva')) history.replaceState(null, '', location.pathname);
 }
 
 async function fetchProfile(){
@@ -1777,6 +1793,245 @@ async function deleteMinisterioSesion(id){
 }
 
 /* =========================================================
+   Tareas — lista de tareas (proyectos, etiquetas y subtareas)
+   ========================================================= */
+async function loadTareas(){
+  const f = await findFile(CONFIG.TAREAS_NAME, folderId, 'application/json');
+  if (!f) { tareas = []; return; }
+  try { tareas = (await (await downloadFile(f.id)).json()) || []; }
+  catch (e) { tareas = []; }
+}
+async function persistTareas(){
+  await saveFile(CONFIG.TAREAS_NAME, 'application/json', JSON.stringify(tareas, null, 2), folderId);
+}
+
+const PRIO = { 1: { lbl: 'Alta', cls: 'p1' }, 2: { lbl: 'Media', cls: 'p2' }, 3: { lbl: 'Baja', cls: 'p3' } };
+const uid = (p) => p + Math.random().toString(36).slice(2, 8);
+
+function tareaProjects(){
+  return [...new Set(tareas.map(t => (t.project || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+}
+function tareaLabels(){
+  const s = new Set();
+  tareas.forEach(t => (t.labels || []).forEach(l => { if (l) s.add(l); }));
+  return [...s].sort((a, b) => a.localeCompare(b));
+}
+function tareaMatchesFilter(t){
+  if (tareasFilter.project && (t.project || '') !== tareasFilter.project) return false;
+  if (tareasFilter.label && !(t.labels || []).includes(tareasFilter.label)) return false;
+  return true;
+}
+function tareasForView(){
+  const today = todayISO();
+  const in7 = new Date(); in7.setDate(in7.getDate() + 7);
+  const in7ISO = in7.toISOString().slice(0, 10);
+  let list = tareas.filter(tareaMatchesFilter);
+  if (tareasView === 'hechas') {
+    return list.filter(t => t.done).sort((a, b) => (b.doneAt || '').localeCompare(a.doneAt || ''));
+  }
+  list = list.filter(t => !t.done);
+  if (tareasView === 'hoy') list = list.filter(t => t.due && t.due <= today);
+  else if (tareasView === 'proximo') list = list.filter(t => t.due && t.due > today && t.due <= in7ISO);
+  return list.sort((a, b) => {
+    const ka = a.due ? a.due + (a.time || '99:99') : '9999';
+    const kb = b.due ? b.due + (b.time || '99:99') : '9999';
+    if (ka !== kb) return ka < kb ? -1 : 1;
+    return (a.priority || 3) - (b.priority || 3);
+  });
+}
+function tareasHoyPend(){
+  const today = todayISO();
+  return tareas.filter(t => !t.done && t.due && t.due <= today)
+    .sort((a, b) => (a.due + (a.time || '')).localeCompare(b.due + (b.time || '')));
+}
+
+function dueBadge(t){
+  if (!t.due) return '';
+  const today = todayISO();
+  const cls = t.due < today ? 'due-over' : t.due === today ? 'due-today' : 'due-fut';
+  const txt = t.due === today ? 'Hoy'
+    : new Date(t.due + 'T00:00').toLocaleDateString('es-ES', { day: '2-digit', month: 'short' });
+  return `<span class="tk-due ${cls}">${escapeHtml(txt)}${t.time ? ' ' + escapeHtml(t.time) : ''}</span>`;
+}
+
+function renderTareasFiltros(){
+  const box = document.getElementById('tareasFiltros');
+  if (!box) return;
+  const projs = tareaProjects(), labs = tareaLabels();
+  if (!projs.length && !labs.length) { box.hidden = true; box.innerHTML = ''; return; }
+  box.hidden = false;
+  const chip = (txt, active, kind, val) =>
+    `<button class="tk-chip${active ? ' active' : ''}" data-kind="${kind}" data-val="${escapeAttr(val)}">${escapeHtml(txt)}</button>`;
+  box.innerHTML =
+    (projs.length ? `<div class="tk-chiprow">${chip('Todos', !tareasFilter.project, 'project', '')}${projs.map(p => chip('# ' + p, tareasFilter.project === p, 'project', p)).join('')}</div>` : '') +
+    (labs.length ? `<div class="tk-chiprow">${chip('Todas', !tareasFilter.label, 'label', '')}${labs.map(l => chip('@ ' + l, tareasFilter.label === l, 'label', l)).join('')}</div>` : '');
+  box.querySelectorAll('.tk-chip').forEach(b => b.addEventListener('click', () => {
+    tareasFilter[b.dataset.kind] = b.dataset.val;
+    renderTareas();
+  }));
+}
+
+function renderTareas(){
+  const list = document.getElementById('tareasList');
+  if (!list) return;
+  renderTareasFiltros();
+  document.querySelectorAll('#tareasNav .tk-vbtn').forEach(b => b.classList.toggle('active', b.dataset.view === tareasView));
+
+  const rows = tareasForView();
+  if (!rows.length) {
+    list.innerHTML = `<p class="empty-note">${
+      tareasView === 'hoy' ? 'Nada para hoy. 🎉'
+      : tareasView === 'proximo' ? 'Nada en los próximos 7 días.'
+      : tareasView === 'hechas' ? 'Aún no has completado ninguna tarea.'
+      : 'No hay tareas. Crea una con «+ Nueva tarea».'}</p>`;
+    renderDashboard();
+    return;
+  }
+  list.innerHTML = rows.map(t => {
+    const p = PRIO[t.priority] || PRIO[3];
+    const subs = t.subtasks || [];
+    const subDone = subs.filter(s => s.done).length;
+    return `<div class="tk-item${t.done ? ' done' : ''}">
+      <button class="tk-check" data-toggle="${escapeAttr(t.id)}" aria-label="Marcar hecha">${t.done ? '✔' : ''}</button>
+      <div class="tk-body">
+        <div class="tk-line1">
+          <span class="tk-prio ${p.cls}" title="Prioridad ${p.lbl}"></span>
+          <span class="tk-title">${escapeHtml(t.title)}</span>
+        </div>
+        <div class="tk-meta">
+          ${dueBadge(t)}
+          ${t.project ? `<span class="tk-tag">#${escapeHtml(t.project)}</span>` : ''}
+          ${(t.labels || []).map(l => `<span class="tk-tag tk-lab">@${escapeHtml(l)}</span>`).join('')}
+          ${subs.length ? `<span class="tk-sub-count">${subDone}/${subs.length}</span>` : ''}
+        </div>
+        ${subs.length ? `<div class="tk-subs">${subs.map(s => `
+          <label class="tk-subrow${s.done ? ' done' : ''}"><input type="checkbox" data-sub="${escapeAttr(t.id)}|${escapeAttr(s.id)}" ${s.done ? 'checked' : ''}><span>${escapeHtml(s.title)}</span></label>`).join('')}</div>` : ''}
+        ${t.notes ? `<div class="tk-notes">${escapeHtml(t.notes)}</div>` : ''}
+      </div>
+      <span class="ev-actions">
+        <button class="icon-btn" data-edit-t="${escapeAttr(t.id)}">✎</button>
+        <button class="icon-btn" data-del-t="${escapeAttr(t.id)}">✕</button>
+      </span>
+    </div>`;
+  }).join('');
+
+  list.querySelectorAll('[data-toggle]').forEach(b => b.addEventListener('click', () => toggleTarea(b.dataset.toggle)));
+  list.querySelectorAll('[data-sub]').forEach(c => c.addEventListener('change', () => toggleSubtarea(c.dataset.sub)));
+  list.querySelectorAll('[data-edit-t]').forEach(b => b.addEventListener('click', () => openTareaModal(b.dataset.editT)));
+  list.querySelectorAll('[data-del-t]').forEach(b => b.addEventListener('click', () => deleteTarea(b.dataset.delT)));
+  renderDashboard();
+}
+
+document.querySelectorAll('#tareasNav .tk-vbtn').forEach(b =>
+  b.addEventListener('click', () => { tareasView = b.dataset.view; renderTareas(); }));
+document.getElementById('addTareaBtn').addEventListener('click', () => openTareaModal());
+
+async function toggleTarea(id){
+  const t = tareas.find(x => x.id === id);
+  if (!t) return;
+  t.done = !t.done;
+  t.doneAt = t.done ? new Date().toISOString() : null;
+  showSand('Guardando…');
+  try { await persistTareas(); renderTareas(); } finally { hideSand(); }
+}
+async function toggleSubtarea(pair){
+  const [tid, sid] = pair.split('|');
+  const t = tareas.find(x => x.id === tid);
+  const s = t && (t.subtasks || []).find(x => x.id === sid);
+  if (!s) return;
+  s.done = !s.done;
+  showSand('Guardando…');
+  try { await persistTareas(); renderTareas(); } finally { hideSand(); }
+}
+async function deleteTarea(id){
+  tareas = tareas.filter(t => t.id !== id);
+  showSand('Guardando…');
+  try { await persistTareas(); renderTareas(); } finally { hideSand(); }
+}
+
+function openTareaModal(id){
+  const t = id ? tareas.find(x => x.id === id) : null;
+  let subs = t ? (t.subtasks || []).map(s => ({ ...s })) : [];
+  const subsHtml = () => subs.map((s, i) => `
+    <div class="parte-input-row" data-i="${i}">
+      <input class="st-title" value="${escapeAttr(s.title)}" placeholder="Subtarea">
+      <button class="icon-btn" data-rm-st="${i}">✕</button>
+    </div>`).join('');
+  const readSubs = () => $$('#stWrap .st-title').map((inp, i) => ({
+    id: (subs[i] && subs[i].id) || uid('s_'), title: inp.value, done: subs[i] ? !!subs[i].done : false,
+  }));
+
+  renderModal(`
+    <h3>${t ? 'Editar tarea' : 'Nueva tarea'}</h3>
+    <div class="field"><label>Título</label><input id="tTitle" value="${t ? escapeAttr(t.title) : ''}" placeholder="Llamar a…"></div>
+    <div class="field" style="flex-direction:row; gap:10px;">
+      <div style="flex:1; display:flex; flex-direction:column; gap:5px;"><label>Fecha</label><input id="tDue" type="date" value="${t ? t.due || '' : ''}"></div>
+      <div style="flex:1; display:flex; flex-direction:column; gap:5px;"><label>Hora</label><input id="tTime" type="time" value="${t ? t.time || '' : ''}"></div>
+    </div>
+    <div class="field"><label>Prioridad</label>
+      <select id="tPrio">
+        <option value="1"${t && t.priority == 1 ? ' selected' : ''}>Alta</option>
+        <option value="2"${!t || t.priority == 2 ? ' selected' : ''}>Media</option>
+        <option value="3"${t && t.priority == 3 ? ' selected' : ''}>Baja</option>
+      </select>
+    </div>
+    <div class="field"><label>Proyecto / lista</label>
+      <input id="tProj" list="tProjList" value="${t ? escapeAttr(t.project || '') : ''}" placeholder="p. ej. Congregación">
+      <datalist id="tProjList">${tareaProjects().map(p => `<option value="${escapeAttr(p)}"></option>`).join('')}</datalist>
+    </div>
+    <div class="field"><label>Etiquetas (separadas por comas)</label>
+      <input id="tLabels" value="${t ? escapeAttr((t.labels || []).join(', ')) : ''}" placeholder="urgente, ministerio"></div>
+    <div class="field"><label>Subtareas</label><div id="stWrap">${subsHtml()}</div>
+      <button class="btn btn-ghost" id="addStBtn" style="align-self:flex-start;">+ Añadir subtarea</button></div>
+    <div class="field"><label>Notas</label><textarea id="tNotes">${t ? escapeHtml(t.notes || '') : ''}</textarea></div>
+    <div class="modal-actions">
+      ${t ? '<button class="btn btn-ghost" id="modalDelete" style="color:#B4432D;">Eliminar</button>' : ''}
+      <button class="btn btn-ghost" id="modalCancel">Cancelar</button>
+      <button class="btn btn-primary" id="modalSave">Guardar</button>
+    </div>`);
+
+  function bindSt(){
+    $$('#stWrap [data-rm-st]').forEach(b => b.addEventListener('click', () => {
+      subs = readSubs();
+      subs.splice(Number(b.dataset.rmSt), 1);
+      $('#stWrap').innerHTML = subsHtml(); bindSt();
+    }));
+  }
+  bindSt();
+  $('#addStBtn').addEventListener('click', () => {
+    subs = readSubs();
+    subs.push({ id: uid('s_'), title: '', done: false });
+    $('#stWrap').innerHTML = subsHtml(); bindSt();
+  });
+  $('#modalCancel').addEventListener('click', closeModal);
+  if (t) $('#modalDelete').addEventListener('click', () => { deleteTarea(t.id); closeModal(); });
+  $('#modalSave').addEventListener('click', async () => {
+    const title = $('#tTitle').value.trim();
+    if (!title) { showError('La tarea necesita un título.'); return; }
+    const subtasks = readSubs().filter(s => s.title.trim()).map(s => ({ ...s, title: s.title.trim() }));
+    const labels = $('#tLabels').value.split(',').map(s => s.trim()).filter(Boolean);
+    const data = {
+      id: t ? t.id : uid('t_'),
+      title,
+      done: t ? !!t.done : false,
+      doneAt: t ? t.doneAt || null : null,
+      due: $('#tDue').value || '',
+      time: $('#tTime').value || '',
+      priority: parseInt($('#tPrio').value, 10) || 2,
+      project: $('#tProj').value.trim(),
+      labels,
+      notes: $('#tNotes').value.trim(),
+      subtasks,
+      createdAt: t ? t.createdAt || new Date().toISOString() : new Date().toISOString(),
+    };
+    if (t) Object.assign(t, data); else tareas.push(data);
+    closeModal();
+    showSand('Guardando en Drive…');
+    try { await persistTareas(); renderTareas(); } finally { hideSand(); }
+  });
+}
+
+/* =========================================================
    Dashboard (pestaña Inicio)
    ========================================================= */
 function todayISO(){ return new Date().toISOString().slice(0, 10); }
@@ -1817,6 +2072,7 @@ function renderDashboard(){
   const proxProyecto = proyectos.slice()
     .filter(p => p.fecha && p.fecha >= today)
     .sort((a, b) => a.fecha.localeCompare(b.fecha))[0];
+  const tHoy = tareasHoyPend().slice(0, 6);
 
   const fD = (iso, opts) => escapeHtml(new Date(iso + 'T00:00').toLocaleDateString('es-ES', opts));
   const card = (title, body, tab) => `
@@ -1825,6 +2081,14 @@ function renderDashboard(){
     </div>`;
 
   box.innerHTML =
+    card('Tareas de hoy',
+      tHoy.length
+        ? `<ul class="dash-lines">${tHoy.map(x => `<li>
+            <span class="dl-date">${x.due < today ? '⚠ ' : ''}${x.time ? escapeHtml(x.time) : 'hoy'}</span>
+            <span class="dl-main">${escapeHtml(x.title)}</span></li>`).join('')}</ul>`
+        : '<p class="empty-note">Sin tareas pendientes para hoy.</p>',
+      'tareas') +
+
     card('Mis próximas responsabilidades',
       mine.length
         ? `<ul class="dash-lines">${mine.map(m => `<li>
