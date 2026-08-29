@@ -243,13 +243,25 @@ $('#pdfInput').addEventListener('change', async (e) => {
   try {
     const ext = isPdf ? 'pdf' : (file.name.split('.').pop() || 'jpg').toLowerCase();
     const mime = isPdf ? 'application/pdf' : file.type;
+    const targetName = `${CONFIG.CUADRANTE_PREFIX}.${ext}`;
 
-    // Borra cualquier cuadrante anterior (puede tener otra extensión si antes era PDF/imagen distinta)
-    const old = await findFilesByPrefix(CONFIG.CUADRANTE_PREFIX, folderId);
-    for (const f of old) await deleteFile(f.id);
+    // Localiza los cuadrantes existentes UNA sola vez. Reutiliza en sitio el que ya
+    // tenga el nombre correcto y borra el resto DESPUÉS de escribir: así no dependemos
+    // del índice de búsqueda de Drive (eventualmente consistente) justo tras un borrado,
+    // que es lo que hacía que la 2ª subida fallara y se perdiera también la anterior.
+    const existing = await findFilesByPrefix(CONFIG.CUADRANTE_PREFIX, folderId);
+    let target = existing.find(f => f.name === targetName) || null;
+    if (!target) target = await createFileMeta(targetName, folderId, mime);
+    await updateFileContent(target.id, mime, file);
 
-    await saveFile(`${CONFIG.CUADRANTE_PREFIX}.${ext}`, mime, file, folderId);
-    await loadCuadrante({ forceReparse: true });
+    for (const f of existing) {
+      if (f.id !== target.id) { try { await deleteFile(f.id); } catch (_) { /* ya no está */ } }
+    }
+
+    await loadCuadrante({
+      forceReparse: true,
+      file: { id: target.id, mimeType: mime, modifiedTime: new Date().toISOString() },
+    });
   } catch (err) {
     console.error(err);
     showError('No se pudo subir el archivo.');
@@ -264,9 +276,12 @@ let currentDocUrl = null;
 let currentDocMime = null;
 let currentParsed = null; // { tipo, asignaciones: [...] }
 
-async function loadCuadrante({ forceReparse = false } = {}){
-  const files = await findFilesByPrefix(CONFIG.CUADRANTE_PREFIX, folderId);
-  const f = files[0] || null;
+async function loadCuadrante({ forceReparse = false, file = null } = {}){
+  let f = file;
+  if (!f) {
+    const files = await findFilesByPrefix(CONFIG.CUADRANTE_PREFIX, folderId);
+    f = files[0] || null;
+  }
   const meta = $('#cuadranteMeta');
   const toggle = $('#viewToggle');
 
@@ -324,6 +339,11 @@ async function analyzeCuadrante(blob, mime){
   } catch (err) {
     console.error(err);
     currentParsed = { tipo: 'desconocido', asignaciones: [], error: true };
+    // Persiste también el estado de error para que una recarga posterior no reutilice
+    // el análisis (cacheado) del cuadrante anterior como si fuera el de este.
+    try {
+      await saveFile(CONFIG.ASIGNACIONES_NAME, 'application/json', JSON.stringify(currentParsed, null, 2), folderId);
+    } catch (_) { /* no crítico */ }
     showError('No se pudo digitalizar el documento; puedes seguir consultando el original.');
   } finally {
     hideSand();
@@ -404,22 +424,62 @@ function jumpToPage(page){
    Extracción de texto posicionado — PDF (pdf.js) e imagen (Tesseract OCR)
    Ambas convergen en el mismo formato: pages = [{ width, lines: [{items, text}] }]
    ========================================================= */
-function clusterItemsIntoLines(items, yTolerance = 6){
-  const sorted = items.slice().sort((a, b) => a.y - b.y);
+function median(arr){
+  if (!arr || !arr.length) return 0;
+  const s = arr.slice().sort((a, b) => a - b);
+  return s[Math.floor(s.length / 2)];
+}
+
+/* Une los fragmentos de una misma línea mirando el hueco real en X entre uno y el
+   siguiente: si van pegados se concatenan sin espacio (evita "pa labra"); si hay
+   separación se mete un espacio (evita "9:30Lectura de la Biblia"). Respeta los
+   espacios que el propio extractor ya haya incluido en el fragmento. */
+function joinItemsX(items){
+  const refH = median(items.map(i => i.h).filter(Boolean)) || 6;
+  let out = '';
+  let prevEnd = null;
+  items.forEach((it, i) => {
+    const frag = String(it.text || '');
+    if (i === 0 || prevEnd == null) { out = frag; prevEnd = it.x + (it.w || 0); return; }
+    const gap = it.x - prevEnd;
+    const glued = /\s$/.test(out) || /^\s/.test(frag);
+    out += (!glued && gap > refH * 0.28 ? ' ' : '') + frag;
+    prevEnd = it.x + (it.w || 0);
+  });
+  return out.replace(/\s+/g, ' ').trim();
+}
+
+/* Agrupa los fragmentos sueltos en líneas visuales por su CENTRO vertical (no por
+   la baseline), con una tolerancia proporcional a la altura del texto. Así una
+   fila con varios tamaños de fuente (hora + título + nombre) no se parte en dos. */
+function clusterItemsIntoLines(items, yTolerance){
+  if (!items || !items.length) return [];
+  if (yTolerance == null) {
+    const medH = median(items.map(i => i.h).filter(Boolean)) || 10;
+    yTolerance = Math.max(4, medH * 0.6);
+  }
+  const withMid = items.map(i => ({
+    ...i,
+    mid: (i.y != null ? i.y : 0) + (i.h ? i.h / 2 : 0),
+  }));
+  const sorted = withMid.slice().sort((a, b) => a.mid - b.mid || a.x - b.x);
+
   const lines = [];
   sorted.forEach(it => {
     const line = lines[lines.length - 1];
-    if (!line || Math.abs(it.y - line.avgY) > yTolerance) {
-      lines.push({ avgY: it.y, items: [it] });
-    } else {
+    if (line && Math.abs(it.mid - line.mid) <= yTolerance) {
       line.items.push(it);
-      line.avgY = (line.avgY * (line.items.length - 1) + it.y) / line.items.length;
+      line.mid = (line.mid * line._n + it.mid) / (line._n + 1);
+      line._n++;
+    } else {
+      lines.push({ mid: it.mid, _n: 1, items: [it] });
     }
   });
+
   return lines
     .map(l => {
-      const items2 = l.items.slice().sort((a, b) => a.x - b.x);
-      return { items: items2, text: items2.map(i => i.text).join(' ').replace(/\s+/g, ' ').trim() };
+      const its = l.items.slice().sort((a, b) => a.x - b.x);
+      return { y: l.mid, items: its, text: joinItemsX(its) };
     })
     .filter(l => l.text);
 }
@@ -433,8 +493,20 @@ async function extractPagesFromPdf(blob){
     const page = await pdf.getPage(p);
     const viewport = page.getViewport({ scale: 1 });
     const content = await page.getTextContent();
-    const items = content.items.map(it => ({ text: it.str, x: it.transform[4], y: -it.transform[5] }));
-    pages.push({ width: viewport.width, lines: clusterItemsIntoLines(items) });
+    const items = content.items
+      .filter(it => it.str && it.str.trim() !== '')
+      .map(it => {
+        const tx = it.transform;
+        const h = it.height || Math.hypot(tx[2], tx[3]) || 10;
+        return {
+          text: it.str,
+          x: tx[4],
+          y: viewport.height - tx[5], // origen arriba, crece hacia abajo
+          w: it.width || 0,
+          h,
+        };
+      });
+    pages.push({ width: viewport.width, height: viewport.height, lines: clusterItemsIntoLines(items) });
   }
   return pages;
 }
@@ -442,9 +514,17 @@ async function extractPagesFromPdf(blob){
 async function extractPagesFromImage(blob, onProgress){
   if (typeof Tesseract === 'undefined') throw new Error('Tesseract no disponible');
   const { data } = await Tesseract.recognize(blob, 'spa', { logger: onProgress });
-  const items = (data.words || []).map(w => ({ text: w.text, x: w.bbox.x0, y: w.bbox.y0 }));
-  const width = data.width || (items.length ? Math.max(...items.map(i => i.x)) : 1000);
-  return [{ width, lines: clusterItemsIntoLines(items, 10) }];
+  const items = (data.words || [])
+    .filter(w => w.text && w.text.trim() !== '')
+    .map(w => ({
+      text: w.text,
+      x: w.bbox.x0,
+      y: w.bbox.y0,
+      w: w.bbox.x1 - w.bbox.x0,
+      h: w.bbox.y1 - w.bbox.y0,
+    }));
+  const width = data.width || (items.length ? Math.max(...items.map(i => i.x + i.w)) : 1000);
+  return [{ width, height: data.height || 1000, lines: clusterItemsIntoLines(items) }];
 }
 
 /* =========================================================
@@ -497,9 +577,13 @@ function cleanParteText(s){
 }
 
 function detectTipo(pages){
-  const key = normalizeKey(pages.map(p => p.lines.map(l => l.text).join(' ')).join(' '));
-  if (key.includes('tesoros de la biblia') || key.includes('seamos mejores maestros')) return 'entre-semana';
-  if (key.includes('discursante') && key.includes('congregacion')) return 'publica';
+  const raw = pages.map(p => p.lines.map(l => l.text).join('\n')).join('\n');
+  const key = normalizeKey(raw);
+  if (key.includes('tesoros de la biblia') || key.includes('seamos mejores maestros') || key.includes('nuestra vida cristiana')) return 'entre-semana';
+  if ((key.includes('discursante') && key.includes('congregacion')) || key.includes('lector de la atalaya')) return 'publica';
+  // Respaldo por formato de fecha cuando los encabezados no se han extraído limpios
+  if (/\d{4}\/\d{2}\/\d{2}\s*\|/.test(raw)) return 'entre-semana';
+  if (/^\s*\d{1,2}\s+[A-ZÁÉÍÓÚÑ]{3,}\s+\d{4}\s*$/m.test(raw)) return 'publica';
   return 'desconocido';
 }
 
