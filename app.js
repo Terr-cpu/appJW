@@ -535,10 +535,26 @@ function normalizeText(s){
 }
 function normalizeKey(s){ return normalizeText(s).replace(/[^a-z0-9]+/g, ' ').trim(); }
 
-/* Encuentra el mayor "hueco" horizontal en la página (entre el 25% y el 85% del ancho)
-   para usarlo como frontera entre la columna de "concepto" y la de "nombre/rol".
-   Es más fiable que un ratio fijo porque se adapta a cada documento. */
-function detectColumnSplit(page){
+/* Frontera entre la columna de "concepto" (izquierda) y la de "rol / nombre"
+   (derecha). Método principal: alinearla con el borde izquierdo de las etiquetas
+   fijas de la derecha ("Oración", "Presidente"… / "PRESIDENTE", "LECTOR"…), que en
+   estos cuadrantes están SIEMPRE a la misma x. Respaldo: el mayor hueco horizontal.
+   Es mucho más estable que el hueco solo, que se rompe con títulos largos. */
+function detectColumnSplit(page, labelTokens){
+  if (labelTokens && labelTokens.length) {
+    const xs = [];
+    page.lines.forEach(l => l.items.forEach(it => {
+      const n = normalizeText(it.text).trim();
+      if (labelTokens.some(tok => n === tok || n.startsWith(tok + ' '))) xs.push(it.x);
+    }));
+    if (xs.length >= 2) {
+      xs.sort((a, b) => a - b);
+      // Cuartil inferior ≈ borde izquierdo de la columna de etiquetas; el margen deja
+      // la frontera claramente a la izquierda de ellas (y de sus valores).
+      const edge = xs[Math.floor(xs.length * 0.25)];
+      return edge - Math.max(12, page.width * 0.02);
+    }
+  }
   const xs = [];
   page.lines.forEach(l => l.items.forEach(i => xs.push(Math.round(i.x))));
   const uniq = [...new Set(xs)].sort((a, b) => a - b);
@@ -554,19 +570,23 @@ function detectColumnSplit(page){
   return bestSplit;
 }
 
-function splitLineByColumn(line, splitX){
-  const leftItems = line.items.filter(i => i.x < splitX);
-  const rightItems = line.items.filter(i => i.x >= splitX);
-  return {
-    left: leftItems.map(i => i.text).join(' ').replace(/\s+/g, ' ').trim(),
-    right: rightItems.map(i => i.text).join(' ').replace(/\s+/g, ' ').trim(),
-  };
+/* Divide un texto de nombres en personas sueltas. Separadores reales en los
+   cuadrantes: "/", "&", "+". NO se parte por coma ni por "y" porque aparecen
+   dentro de nombres ("Diaz, Domínguez", "Amaya y..."). */
+function splitNames(text){
+  return String(text || '')
+    .replace(/\s+/g, ' ')
+    .split(/\s*[\/⁄&+]\s*/)
+    .map(s => s.trim().replace(/^[·•\-–,;.]+\s*/, '').trim())
+    .filter(Boolean);
 }
 
 /* Limpia artefactos típicos de fuentes con mapeo Unicode roto en el PDF de origen
    (viñetas que se extraen como "e", "«", "+", comas en vez de puntos, etc.) */
 function cleanParteText(s){
   let t = String(s || '').trim();
+  // 0) Quita viñetas al principio (una o varias): • · ▪ ◦ ‣ ∙ *
+  t = t.replace(/^[•·▪◦‣∙*]+\s*/, '');
   // 1) Quita cualquier viñeta/artefacto de 1-2 caracteres NO alfanuméricos al principio
   t = t.replace(/^[^\wÀ-ÿ¿¡0-9]{1,2}\s*/, '');
   // 2) Si empieza por número de parte, normaliza "N," / "N;" a "N."
@@ -589,171 +609,256 @@ function detectTipo(pages){
 
 const MIDWEEK_SECTIONS = ['tesoros de la biblia', 'seamos mejores maestros', 'nuestra vida cristiana', 'vivamos como cristianos'];
 
-/* Igual que en "publica": no se procesa línea a línea de forma aislada. Cada FILA LÓGICA
-   (todo lo que cuelga de una misma hora, aunque el título de la parte o el nombre se
-   repartan en varias líneas por ser largos) se acumula y se cierra solo cuando llega la
-   siguiente hora, sección o fecha. Así los nombres largos partidos en dos líneas no se
-   convierten en "asignaciones fantasma" sueltas. */
-/* Compara dos textos por solapamiento de palabras; sirve para detectar líneas casi
-   duplicadas que el OCR a veces genera al leer dos veces el mismo trozo de una foto. */
-function isNearDuplicate(a, b){
-  if (!a || !b) return false;
-  const wa = normalizeText(a).split(/\s+/).filter(Boolean);
-  const wb = normalizeText(b).split(/\s+/).filter(Boolean);
-  if (!wa.length || !wb.length) return false;
-  const setA = new Set(wa);
-  const common = wb.filter(w => setA.has(w)).length;
-  return common / Math.max(wa.length, wb.length) > 0.6;
+const MIDWEEK_LABEL_TOKENS = ['oracion', 'presidente', 'conductor', 'lector'];
+const MIDWEEK_ROLE_RE = /^\s*(Oraci[oó]n|Presidente|Conductor|Lector|Consejero(?:\s+de\s+la\s+sala\s+auxiliar)?)\b[\s:.\-]*(.*)$/i;
+const MIDWEEK_SKIP_RE = /^(sala auxiliar|sala auxiliar auditorio principal|auditorio principal|consejero de la sala auxiliar)$/;
+const MIDWEEK_TIME_RE = /^(\d{1,2}):(\d{2})$/;
+const MIDWEEK_DATE_RE = /^(\d{4}\/\d{2}\/\d{2})\s*[|｜Il]\s*(.*)$/;
+
+function midweekRole(text){
+  const m = String(text || '').match(MIDWEEK_ROLE_RE);
+  if (!m) return null;
+  const r = m[1].toLowerCase();
+  const rol = /^oraci/.test(r) ? 'Oración'
+    : /^presidente/.test(r) ? 'Presidente'
+    : /^conductor/.test(r) ? 'Conductor'
+    : /^lector/.test(r) ? 'Lector'
+    : 'Consejero de la sala auxiliar';
+  return { rol, resto: m[2].trim() };
 }
 
-/* Igual que en "publica": no se procesa línea a línea de forma aislada. Cada FILA LÓGICA
-   (todo lo que cuelga de una misma hora, aunque el título de la parte o el nombre se
-   repartan en varias líneas por ser largos) se acumula y se cierra solo cuando llega la
-   siguiente hora, sección o fecha. Así los nombres largos partidos en dos líneas no se
-   convierten en "asignaciones fantasma" sueltas. Además, una hora solo se acepta como
-   inicio de fila nueva si es igual o posterior a la última vista en la misma fecha —
-   esto filtra números sueltos que el PDF/OCR confunde con una hora real. */
+function isMidweekSkipLine(t){
+  const k = normalizeKey(t);
+  if (MIDWEEK_SKIP_RE.test(k)) return true;
+  if (/^(consejerodelasalaauxiliar|salaauxiliarauditorioprincipal|salaauxiliar|auditorioprincipal)/.test(k.replace(/\s+/g, ''))) return true;
+  return /^impreso\b/i.test(t) || /^programa para la reuni/i.test(t);
+}
+
+/* El cuadrante de entre semana es una tabla densa donde la HORA (columna izquierda)
+   aparece un poco por debajo del título y del nombre de su fila, y filas contiguas
+   se solapan verticalmente. Por eso NO se agrupa por cercanía vertical: se anclan
+   las filas en los tokens de hora y cada fila abarca una "banda" [hora.y - Δ, …).
+   Dentro de la banda, la izquierda es el título y la derecha se trocea en grupos:
+   cada sub-línea que empieza por un rol (Conductor, Lector…) abre un grupo nuevo. */
 function parseMidweek(pages){
   const asignaciones = [];
-  let fecha = null, lectura = null, seccion = null;
-  let currentRow = null;
-  let lastMinutes = null;
-
-  function toMinutes(hhmm){
-    const m = hhmm.match(/^(\d{1,2}):(\d{2})$/);
-    return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
-  }
-
-  function flushRow(){
-    if (!currentRow) return;
-    const leftText = currentRow.leftParts.join(' ').replace(/\s+/g, ' ').trim();
-    let rightText = currentRow.rightParts.join(' ').replace(/\s+/g, ' ').trim();
-    const hora = currentRow.hora;
-    let parte = cleanParteText(leftText);
-
-    const durMatch = rightText.match(/^\((\d+\s*min\.?)\)\s*/i);
-    if (durMatch) { parte = `${parte} (${durMatch[1]})`.trim(); rightText = rightText.slice(durMatch[0].length).trim(); }
-
-    if (!rightText) {
-      if (parte) asignaciones.push({ fecha: currentRow.fecha, lectura: currentRow.lectura, seccion: currentRow.seccion, hora, parte, rol: null, nombres: [] });
-    } else {
-      const roleMatch = rightText.match(/^(Oraci[oó]n|Presidente|Conductor|Lector|Consejero de la sala auxiliar)\s+(.*)$/i);
-      const rol = roleMatch ? roleMatch[1] : null;
-      const nombreTexto = roleMatch ? roleMatch[2] : rightText;
-      const nombres = nombreTexto.split('/').map(n => n.trim()).filter(Boolean);
-
-      // Fragmento huérfano (sin hora ni parte, solo nombre): no crea una tarjeta rota,
-      // se añade como nombre extra a la última asignación real de la misma fecha.
-      const prev = asignaciones[asignaciones.length - 1];
-      if (!hora && !parte && !rol && nombres.length && prev && prev.fecha === currentRow.fecha) {
-        prev.nombres = (prev.nombres || []).concat(nombres);
-      } else if (parte || nombres.length) {
-        asignaciones.push({ fecha: currentRow.fecha, lectura: currentRow.lectura, seccion: currentRow.seccion, hora, parte, rol, nombres });
-      }
-    }
-    currentRow = null;
-  }
 
   pages.forEach(page => {
-    const splitX = detectColumnSplit(page);
-    page.lines.forEach(line => {
-      const t = line.text;
-      const dateMatch = t.match(/^(\d{4}\/\d{2}\/\d{2})\s*\|\s*(.+)$/);
-      if (dateMatch) { flushRow(); fecha = dateMatch[1]; lectura = dateMatch[2].trim(); seccion = null; lastMinutes = null; return; }
-      if (MIDWEEK_SECTIONS.includes(normalizeKey(t))) { flushRow(); seccion = t.trim(); return; }
-      if (/sala auxiliar/i.test(t) || /auditorio principal/i.test(t) || /^impreso/i.test(t)) return;
-      if (!fecha) return;
+    const width = page.width;
+    const items = page.lines.reduce((acc, l) => acc.concat(l.items), []);
+    if (!items.length) return;
+    const splitX = detectColumnSplit(page, MIDWEEK_LABEL_TOKENS);
+    const subs = clusterItemsIntoLines(items, 4.5);
 
-      const { left, right } = splitLineByColumn(line, splitX);
-      if (!left && !right) return;
-
-      const timeMatch = left.match(/^(\d{1,2}:\d{2})\s*(.*)$/);
-      const timeMinutes = timeMatch ? toMinutes(timeMatch[1]) : null;
-      // Solo se acepta como hora real si es igual o posterior a la última vista en esta fecha;
-      // si no, es un artefacto de lectura (PDF con fuente rota u OCR) y se trata como continuación.
-      const isRealTime = timeMatch && (lastMinutes === null || timeMinutes >= lastMinutes);
-      const rightStartsRole = /^(Oraci[oó]n|Presidente|Conductor|Lector|Consejero de la sala auxiliar)\b/i.test(right);
-
-      if (isRealTime) {
-        flushRow();
-        lastMinutes = timeMinutes;
-        currentRow = { fecha, lectura, seccion, hora: timeMatch[1], leftParts: [timeMatch[2]], rightParts: [right] };
-      } else if (currentRow && rightStartsRole && currentRow.rightParts.some(p => p)) {
-        // Segundo rol para la MISMA parte (p. ej. "Conductor" + "Lector" en el estudio bíblico):
-        // cierra la asignación ya acumulada y abre otra con la misma hora/parte para este nuevo rol.
-        const { fecha: f2, lectura: l2, seccion: s2, hora: h2, leftParts: lp2 } = currentRow;
-        flushRow();
-        currentRow = { fecha: f2, lectura: l2, seccion: s2, hora: h2, leftParts: lp2.slice(), rightParts: [right] };
-      } else if (currentRow) {
-        // continuación (línea envuelta, o falsa hora descartada) de la fila abierta
-        if (left && !isNearDuplicate(left, currentRow.leftParts[currentRow.leftParts.length - 1])) {
-          currentRow.leftParts.push(left);
-        }
-        if (right && !isNearDuplicate(right, currentRow.rightParts[currentRow.rightParts.length - 1])) {
-          currentRow.rightParts.push(right);
-        }
-      } else {
-        // línea suelta sin hora todavía al principio de la fecha/sección
-        currentRow = { fecha, lectura, seccion, hora: null, leftParts: [left], rightParts: [right] };
+    // --- clasifica sub-líneas en fronteras (fecha / sección / hora) ---
+    const boundaries = []; // { y, kind, text }
+    const timeYs = [];
+    subs.forEach(s => {
+      const t = s.text.trim();
+      if (!t) return;
+      if (MIDWEEK_DATE_RE.test(t)) { boundaries.push({ y: s.y, kind: 'date', text: t }); return; }
+      if (MIDWEEK_SECTIONS.includes(normalizeKey(t))) { boundaries.push({ y: s.y, kind: 'section', text: t }); return; }
+      const first = s.items[0];
+      if (first && MIDWEEK_TIME_RE.test(first.text.trim()) && first.x < width * 0.18) {
+        boundaries.push({ y: s.y, kind: 'time', text: first.text.trim() });
+        timeYs.push(s.y);
       }
     });
+    boundaries.sort((a, b) => a.y - b.y);
+
+    const gaps = timeYs.slice(1).map((y, i) => y - timeYs[i]);
+    const delta = Math.min(13, Math.max(6, 0.6 * (gaps.length ? median(gaps) : 20)));
+
+    // banda de cada hora: [hora.y - Δ, siguiente frontera.y - Δ)
+    const bands = [];
+    boundaries.forEach((b, i) => {
+      if (b.kind !== 'time') return;
+      const next = boundaries[i + 1];
+      bands.push({
+        yTop: b.y - delta,
+        yBot: next ? next.y - delta : Infinity,
+        hora: b.text,
+        lefts: [], rights: [],
+      });
+    });
+
+    // contexto (fecha/lectura/sección) vigente a una altura dada
+    const ctxAt = (y) => {
+      let fecha = null, lectura = null, seccion = null;
+      for (const b of boundaries) {
+        if (b.y - delta > y + 0.1) break;
+        if (b.kind === 'date') {
+          const dm = b.text.match(MIDWEEK_DATE_RE);
+          fecha = dm[1]; lectura = dm[2].trim() || null; seccion = null;
+        } else if (b.kind === 'section') {
+          seccion = b.text.trim();
+        }
+      }
+      return { fecha, lectura, seccion };
+    };
+
+    subs.forEach(s => {
+      const t = s.text.trim();
+      if (!t || isMidweekSkipLine(t)) return;
+      if (MIDWEEK_DATE_RE.test(t) || MIDWEEK_SECTIONS.includes(normalizeKey(t))) return;
+      const first = s.items[0];
+      if (first && MIDWEEK_TIME_RE.test(first.text.trim()) && first.x < width * 0.18 && s.items.length === 1) return;
+
+      const band = bands.find(b => s.y >= b.yTop && s.y < b.yBot);
+      if (!band) return;
+      const leftItems = s.items.filter(it => it.x < splitX && !MIDWEEK_TIME_RE.test(it.text.trim()));
+      const rightItems = s.items.filter(it => it.x >= splitX);
+      const lt = joinItemsX(leftItems).trim();
+      const rt = joinItemsX(rightItems).trim();
+      if (lt) band.lefts.push({ y: s.y, text: lt });
+      if (rt) band.rights.push({ y: s.y, text: rt });
+    });
+
+    bands.forEach(band => {
+      const { fecha, lectura, seccion } = ctxAt(band.yTop + delta);
+      if (!fecha) return;
+      const leftText = band.lefts.sort((a, b) => a.y - b.y).map(x => x.text).join(' ').replace(/\s+/g, ' ').trim();
+      const parte = cleanParteText(leftText);
+
+      // Agrupa la derecha: cada sub-línea que empieza por un ROL abre grupo nuevo;
+      // las demás son continuación (nombre partido). Se trocea en personas al final.
+      const groups = [];
+      band.rights.sort((a, b) => a.y - b.y).forEach(({ text: rt }) => {
+        const r = midweekRole(rt);
+        if (r) groups.push({ rol: r.rol, raw: r.resto });
+        else if (groups.length) groups[groups.length - 1].raw = `${groups[groups.length - 1].raw} ${rt}`.trim();
+        else groups.push({ rol: null, raw: rt });
+      });
+      const parsed = groups.map(g => ({ rol: g.rol, nombres: splitNames(g.raw) }));
+
+      if (!parsed.length) {
+        if (parte) asignaciones.push({ fecha, lectura, seccion, hora: band.hora, parte, rol: null, nombres: [] });
+        return;
+      }
+      parsed.forEach(g => {
+        if (!parte && !g.rol && !g.nombres.length) return;
+        asignaciones.push({ fecha, lectura, seccion, hora: band.hora, parte, rol: g.rol, nombres: g.nombres });
+      });
+    });
   });
-  flushRow();
+
   return asignaciones;
 }
 
-const PUBLIC_LEFT_DEFS = [
-  { key: 'discursante', phrase: 'DISCURSANTE' },
-  { key: 'tema', phrase: 'TEMA' },
-  { key: 'congregacion', phrase: 'CONGREGACI[OÓ]N' },
-];
-const PUBLIC_RIGHT_DEFS = [
-  { key: 'presidente', phrase: 'PRESIDENTE' },
-  { key: 'lectorAtalaya', phrase: 'LECTOR\\s+DE\\s+LA\\s+ATALAYA' },
-  { key: 'oracionConclusion', phrase: 'ORACI[OÓ]N\\s+DE\\s+CONCLUSI[OÓ]N' },
-];
+const PUBLIC_LABEL_TOKENS = ['presidente', 'lector', 'oracion'];
+const SPANISH_MONTHS = new Set([
+  'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto',
+  'septiembre', 'setiembre', 'octubre', 'noviembre', 'diciembre',
+]);
 
-function extractFieldsByAnchors(text, defs){
-  const found = [];
-  defs.forEach(({ key, phrase }) => {
-    const m = new RegExp(phrase, 'i').exec(text);
-    if (m) found.push({ key, start: m.index, end: m.index + m[0].length });
-  });
-  found.sort((a, b) => a.start - b.start);
-  const result = {};
-  found.forEach((f, i) => {
-    const end = i + 1 < found.length ? found[i + 1].start : text.length;
-    result[f.key] = text.slice(f.end, end).trim();
-  });
-  return result;
+/* Etiquetas fijas de cada mitad de la tabla. El "valor" es lo que va detrás de la
+   etiqueta (misma celda) o en celdas siguientes de la misma mitad hasta la próxima
+   etiqueta. Las etiquetas de la derecha se parten en dos renglones ("LECTOR DE LA"
+   / "ATALAYA"): el segundo renglón se reconoce como RUIDO y se descarta. */
+const PUBLIC_LEFT_LABELS = [
+  { key: 'discursante',  re: /^\s*discursante\b[\s:.\-]*/i },
+  { key: 'tema',         re: /^\s*tema\b[\s:.\-]*/i },
+  { key: 'congregacion', re: /^\s*congregaci[oó]n\b[\s:.\-]*/i },
+];
+const PUBLIC_RIGHT_LABELS = [
+  { key: 'presidente',        re: /^\s*presidente\b[\s:.\-]*/i },
+  { key: 'lectorAtalaya',     re: /^\s*lector(?:\s+de\s+la(?:\s+atalaya)?)?\b[\s:.\-]*/i },
+  { key: 'oracionConclusion', re: /^\s*oraci[oó]n(?:\s+de(?:\s+conclusi[oó]n)?)?\b[\s:.\-]*/i },
+];
+/* Restos del 2º renglón de una etiqueta partida ("LECTOR DE LA" / "ATALAYA",
+   "ORACIÓN DE" / "CONCLUSIÓN"). Se quitan del principio de una celda de valor. */
+const PUBLIC_RIGHT_NOISE_RE = /^\s*(?:atalaya|conclusi[oó]n|de\s+la\s+atalaya|de\s+conclusi[oó]n|de\s+la|de)\b[\s:.\-]*/i;
+
+function stripPublicLabel(text, re){
+  const m = String(text).match(re);
+  return m ? String(text).slice(m[0].length).trim() : null;
 }
 
-/* Importante: aquí NO se agrupa línea a línea. Se reparte cada palabra de todo el bloque
-   (una fecha hasta la siguiente) en dos bolsas —izquierda/derecha— según su columna, y
-   SOLO DESPUÉS se reconstruyen las líneas de cada bolsa por separado. Así, aunque dos filas
-   estén muy pegadas verticalmente, nunca se mezclan palabras de una columna con la otra. */
+/* Trocea una línea en "celdas" allí donde hay un hueco horizontal grande
+   (frontera real de columna), no en cada espacio entre palabras. */
+function rowCells(items, pageWidth){
+  const gapMin = Math.max(10, pageWidth * 0.022);
+  const sorted = items.slice().sort((a, b) => a.x - b.x);
+  const cells = [];
+  let cur = null;
+  sorted.forEach(it => {
+    if (cur && it.x - cur.end < gapMin) {
+      cur.text += (/\s$/.test(cur.text) ? '' : ' ') + it.text;
+      cur.end = it.x + (it.w || 0);
+    } else {
+      cur = { text: it.text, x: it.x, end: it.x + (it.w || 0) };
+      cells.push(cur);
+    }
+  });
+  return cells.map(c => ({ text: c.text.replace(/\s+/g, ' ').trim(), x: c.x })).filter(c => c.text);
+}
+
+/* La reunión pública es una tabla: cada fecha es un bloque con dos mitades. Se lee
+   fila por fila y celda por celda; cada celda es una etiqueta (fija el campo activo
+   de esa mitad) o un valor (se añade al campo activo de su mitad). Así los valores
+   partidos en varias líneas ("CARLOS ALONSO DEL" / "RÍO") se recomponen bien. */
 function parsePublica(pages){
-  const blocks = [];
-  let current = null;
+  const results = [];
+  let cur = null;
+
+  function flush(){
+    if (!cur) return;
+    const b = cur; cur = null;
+    if (/\bASAMBLEA\b/i.test(b.allText)) { results.push({ fecha: b.fecha, asamblea: true }); return; }
+
+    const f = { fecha: b.fecha, discursante: '', tema: '', congregacion: '', presidente: '', lectorAtalaya: '', oracionConclusion: '' };
+    let activeL = null, activeR = null;
+    b.rows.forEach(cells => {
+      cells.forEach(cell => {
+        const right = cell.x >= b.split;
+        const labels = right ? PUBLIC_RIGHT_LABELS : PUBLIC_LEFT_LABELS;
+        let isLabel = false;
+        for (const lab of labels) {
+          const rest = stripPublicLabel(cell.text, lab.re);
+          if (rest == null) continue;
+          if (right) activeR = lab.key; else activeL = lab.key;
+          if (rest) f[lab.key] += (f[lab.key] ? ' ' : '') + rest;
+          isLabel = true;
+          break;
+        }
+        if (isLabel) return;
+        let val = cell.text;
+        if (right) {
+          val = val.replace(PUBLIC_RIGHT_NOISE_RE, '').trim();
+          if (!val) return; // era solo el resto de una etiqueta partida
+        }
+        const active = right ? activeR : activeL;
+        if (active) f[active] += (f[active] ? ' ' : '') + val;
+      });
+    });
+    Object.keys(f).forEach(k => { if (typeof f[k] === 'string') f[k] = f[k].replace(/\s+/g, ' ').trim(); });
+    // Un bloque con fecha pero sin ningún dato = semana de asamblea / sin reunión
+    // pública (el rótulo "ASAMBLEA" del PDF suele ser una imagen y no se extrae).
+    if (!(f.discursante || f.tema || f.congregacion || f.presidente || f.lectorAtalaya || f.oracionConclusion)) {
+      results.push({ fecha: b.fecha, asamblea: true });
+      return;
+    }
+    results.push(f);
+  }
+
   pages.forEach(page => {
-    const splitX = detectColumnSplit(page);
+    const split = detectColumnSplit(page, PUBLIC_LABEL_TOKENS);
     page.lines.forEach(line => {
-      const t = line.text;
-      const dateMatch = t.match(/^(\d{1,2}\s+[A-ZÁÉÍÓÚÑ]+\s+\d{4})$/);
-      if (dateMatch) { current = { fecha: dateMatch[1], leftItems: [], rightItems: [] }; blocks.push(current); return; }
-      if (!current) return;
-      line.items.forEach(it => (it.x < splitX ? current.leftItems : current.rightItems).push(it));
+      const t = line.text.trim();
+      if (!t || /^reuni[oó]n p[uú]blica/i.test(t)) return;
+      const dm = t.match(/^(\d{1,2})\s+([A-Za-zÁÉÍÓÚÜÑáéíóúüñ.]{3,})\s+(\d{4})\b/);
+      if (dm && SPANISH_MONTHS.has(normalizeText(dm[2]).replace(/[^a-z]/g, ''))) {
+        flush();
+        cur = { fecha: `${dm[1]} ${dm[2].toUpperCase()} ${dm[3]}`, rows: [], allText: '', split };
+        return;
+      }
+      if (!cur) return;
+      cur.rows.push(rowCells(line.items, page.width));
+      cur.allText += ' ' + t;
     });
   });
-
-  return blocks
-    .map(b => {
-      const leftText = clusterItemsIntoLines(b.leftItems, 4).map(l => l.text).join(' ');
-      const rightText = clusterItemsIntoLines(b.rightItems, 4).map(l => l.text).join(' ');
-      if (/ASAMBLEA/i.test(leftText + ' ' + rightText)) return { fecha: b.fecha, asamblea: true };
-      return { fecha: b.fecha, ...extractFieldsByAnchors(leftText, PUBLIC_LEFT_DEFS), ...extractFieldsByAnchors(rightText, PUBLIC_RIGHT_DEFS) };
-    })
-    .filter(a => a.asamblea || a.discursante);
+  flush();
+  return results;
 }
 
 function parseCuadrante(pages){
@@ -859,18 +964,24 @@ function categorizeMidweekRow(a){
     if (/lector/i.test(a.rol)) return 'Lector del estudio';
     return a.rol;
   }
+  const parte = a.parte || '';
+  if (/^canci[oó]n\b/i.test(parte)) return 'Canción';
+  if (/palabras de introducci/i.test(parte)) return 'Palabras de introducción';
+  if (/palabras de conclusi/i.test(parte)) return 'Palabras de conclusión';
+  if (/necesidades de la congregaci/i.test(parte)) return 'Necesidades de la congregación';
+
   const seccionKey = a.seccion ? normalizeKey(a.seccion) : null;
   if (seccionKey === 'tesoros de la biblia') {
-    if (/lectura de la biblia/i.test(a.parte || '')) return 'Lectura de la Biblia';
-    if (/perlas escondidas/i.test(a.parte || '')) return 'Perlas escondidas';
+    if (/lectura de la biblia/i.test(parte)) return 'Lectura de la Biblia';
+    if (/perlas escondidas/i.test(parte)) return 'Perlas escondidas';
     return 'Tesoros de la Biblia';
   }
   if (seccionKey === 'seamos mejores maestros') return 'Asignación estudiantil';
   if (seccionKey === 'nuestra vida cristiana' || seccionKey === 'vivamos como cristianos') {
-    if (/estudio b[ií]blico/i.test(a.parte || '')) return 'Estudio bíblico';
+    if (/estudio b[ií]blico/i.test(parte)) return 'Estudio bíblico';
     return 'Nuestra Vida Cristiana';
   }
-  return a.parte || 'Asignación';
+  return parte || 'Asignación';
 }
 
 /* ---------- Localizar mi nombre en el historial registrado (no depende del documento actual) ---------- */
