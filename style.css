@@ -336,6 +336,61 @@ main{max-width:720px; margin:0 auto; padding:20px 20px 60px;}
   font-size:.9rem; color:var(--ink); padding-bottom:8px; margin-bottom:4px; border-bottom:1px solid var(--line);
 }
 
+/* ---------- Tareas ---------- */
+.field select{
+  font-family:var(--font-body); font-size:.9rem; padding:9px 10px;
+  border:1px solid var(--line); border-radius:8px; background:var(--paper); color:var(--ink);
+}
+.tk-nav{display:flex; gap:6px; margin-bottom:12px; overflow-x:auto;}
+.tk-vbtn{
+  font-family:var(--font-body); font-size:.76rem; font-weight:600; white-space:nowrap;
+  padding:7px 12px; border-radius:999px; border:1.5px solid var(--line);
+  background:var(--surface); color:var(--ink-soft); cursor:pointer;
+}
+.tk-vbtn.active{background:var(--ink); color:var(--paper); border-color:var(--ink);}
+.tk-filtros{display:flex; flex-direction:column; gap:6px; margin-bottom:12px;}
+.tk-filtros[hidden]{display:none;}
+.tk-chiprow{display:flex; gap:6px; flex-wrap:wrap;}
+.tk-chip{
+  font-size:.72rem; padding:4px 10px; border-radius:999px; cursor:pointer;
+  border:1px solid var(--line); background:var(--surface); color:var(--ink-soft);
+}
+.tk-chip.active{background:var(--sand-dark); color:#FFF; border-color:var(--sand-dark);}
+
+.tk-list{display:flex; flex-direction:column; gap:8px;}
+.tk-item{
+  display:flex; gap:10px; align-items:flex-start;
+  background:var(--surface); border:1px solid var(--line); border-radius:12px;
+  padding:10px 12px; box-shadow:var(--shadow);
+}
+.tk-item.done{opacity:.55;}
+.tk-item.done .tk-title{text-decoration:line-through;}
+.tk-check{
+  flex-shrink:0; width:22px; height:22px; margin-top:1px; border-radius:50%;
+  border:1.5px solid var(--sand-dark); background:var(--surface); color:var(--teal);
+  cursor:pointer; font-size:.8rem; line-height:1; display:flex; align-items:center; justify-content:center;
+}
+.tk-item.done .tk-check{background:var(--teal); color:#FFF; border-color:var(--teal);}
+.tk-body{flex:1; min-width:0;}
+.tk-line1{display:flex; align-items:baseline; gap:7px;}
+.tk-prio{width:7px; height:7px; border-radius:50%; flex-shrink:0; display:inline-block; margin-top:1px;}
+.tk-prio.p1{background:var(--brick);}
+.tk-prio.p2{background:var(--sand);}
+.tk-prio.p3{background:var(--line);}
+.tk-title{font-weight:600; font-size:.9rem; color:var(--ink); word-break:break-word;}
+.tk-meta{display:flex; flex-wrap:wrap; gap:6px; margin-top:4px; align-items:center;}
+.tk-due{font-family:var(--font-mono); font-size:.66rem; padding:2px 6px; border-radius:5px;}
+.tk-due.due-over{background:#FBEAE5; color:var(--brick);}
+.tk-due.due-today{background:#FBF3DC; color:var(--sand-dark);}
+.tk-due.due-fut{background:var(--paper); color:var(--ink-soft);}
+.tk-tag{font-size:.68rem; color:var(--teal); background:#EAF2EF; padding:2px 6px; border-radius:5px;}
+.tk-tag.tk-lab{color:var(--sand-dark); background:#FBF3DC;}
+.tk-sub-count{font-family:var(--font-mono); font-size:.66rem; color:var(--ink-soft);}
+.tk-subs{margin-top:6px; display:flex; flex-direction:column; gap:3px;}
+.tk-subrow{display:flex; gap:6px; align-items:center; font-size:.82rem; color:var(--ink-soft);}
+.tk-subrow.done span{text-decoration:line-through; opacity:.7;}
+.tk-notes{margin-top:6px; font-size:.8rem; color:var(--ink-soft); white-space:pre-wrap;}
+
 /* ---------- Aviso de error ---------- */
 .error-banner{
   position:fixed; top:0; left:0; right:0; z-index:200;
