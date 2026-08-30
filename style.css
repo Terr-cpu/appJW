@@ -159,6 +159,17 @@ input, textarea, select{font-family:var(--font-body); color:var(--ink);}
 .ch-tipo{font-size:.7rem; color:var(--ink-soft);}
 .ch-del{position:absolute; top:4px; right:4px; background:none; border:none; cursor:pointer; font-size:.78rem; opacity:.4; padding:2px;}
 .ch-del:hover{opacity:1;}
+.ch-dest{font-size:.74rem; color:var(--ink-soft); margin-top:8px; display:flex; gap:6px; align-items:center; flex-wrap:wrap;}
+.ch-dest strong{color:var(--ink);}
+.ch-chg{background:none; border:1px solid var(--line); border-radius:999px; font-size:.7rem; padding:3px 10px; cursor:pointer; color:var(--teal);}
+.ch-chg:hover{background:var(--paper-2);}
+
+/* Selector de carpeta (modal) */
+.pk-bar{display:flex; align-items:center; gap:3px; flex-wrap:wrap; font-size:.8rem;
+  background:var(--paper-2); border:1px solid var(--line); border-radius:10px; padding:7px 9px; margin-bottom:10px;}
+.pk-list{display:flex; flex-direction:column; gap:5px; max-height:46vh; overflow-y:auto;}
+.ex-tools{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;}
+.ex-up{font-size:.74rem; padding:5px 12px; position:relative; overflow:hidden;}
 
 /* ---------- Toggle vista digital / original ---------- */
 .view-toggle{display:flex; gap:6px; margin-bottom:14px;}
