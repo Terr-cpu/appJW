@@ -1,0 +1,20 @@
+{
+  "appId": "org.agendajw.app",
+  "appName": "Agenda JW",
+  "webDir": "www",
+  "server": { "androidScheme": "https" },
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_icon",
+      "iconColor": "#D3A441"
+    },
+    "GoogleAuth": {
+      "scopes": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/calendar"
+      ],
+      "serverClientId": "989709837307-449de0hk767r7lplvjfc4ilfb6smnpfd.apps.googleusercontent.com",
+      "forceCodeForRefreshToken": true
+    }
+  }
+}
