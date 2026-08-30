@@ -45,10 +45,10 @@
 
 <nav class="tabs" id="tabs" hidden>
   <button class="tab active" data-tab="inicio"><span class="tab-i">🏠</span>Inicio</button>
+  <button class="tab" data-tab="asignaciones"><span class="tab-i">📌</span>Asignaciones</button>
   <button class="tab" data-tab="tareas"><span class="tab-i">✅</span>Tareas</button>
   <button class="tab" data-tab="calendario"><span class="tab-i">📅</span>Calendario</button>
   <button class="tab" data-tab="cuadrante"><span class="tab-i">📄</span>Cuadrante</button>
-  <button class="tab" data-tab="programa"><span class="tab-i">📋</span>Programa</button>
   <button class="tab" data-tab="ministerio"><span class="tab-i">⏱️</span>Ministerio</button>
   <button class="tab" data-tab="proyectos"><span class="tab-i">🗂️</span>Proyectos</button>
   <button class="tab" data-tab="archivos"><span class="tab-i">📁</span>Archivos</button>
@@ -65,14 +65,26 @@
     <div id="dashboard" class="dashboard"></div>
   </section>
 
+  <section id="tab-asignaciones" class="panel">
+    <div class="panel-head">
+      <h2>Asignaciones</h2>
+      <button id="addAsignacionBtn" class="btn btn-primary">+ Nueva</button>
+    </div>
+    <p class="section-sub">Las asignaciones aprobadas (✓). Van al calendario. Puedes crear, editar o eliminar.</p>
+    <div id="asignacionesList" class="asg-list"></div>
+  </section>
+
   <section id="tab-cuadrante" class="panel">
     <div class="panel-head">
-      <h2>Cuadrante de asignaciones</h2>
+      <h2>Cuadrante</h2>
       <label class="btn btn-primary file-btn">
         Subir PDF o imagen
         <input type="file" id="pdfInput" accept="application/pdf,image/*" hidden>
       </label>
     </div>
+    <p class="section-sub">Sube el cuadrante, búscate por nombre y aprueba (✓) tus asignaciones.</p>
+
+    <div id="cuadranteHistory" class="cuad-hist" hidden></div>
     <div id="cuadranteMeta" class="meta-line"></div>
 
     <div class="name-search">
@@ -88,21 +100,12 @@
     <div id="searchMatches" class="name-matches" hidden></div>
 
     <div id="hiddenBar" class="hidden-bar" hidden></div>
-    <button id="goProgramaBtn" class="btn btn-ghost" hidden>Ver programa completo →</button>
-  </section>
 
-  <section id="tab-programa" class="panel">
-    <div class="panel-head">
-      <h2>Programa</h2>
-    </div>
-    <div id="cuadranteHistory" class="cuad-hist" hidden></div>
     <div class="view-toggle" id="viewToggle" hidden>
       <button class="vt-btn active" data-view="digital">Vista digital</button>
       <button class="vt-btn" data-view="original">Documento original</button>
     </div>
-
     <div id="digitalView" class="digital-view"></div>
-
     <div id="cuadranteViewer" class="pdf-viewer empty" hidden>
       <p>Todavía no hay ningún cuadrante subido.</p>
     </div>
@@ -167,6 +170,7 @@
 </main>
 
 <div id="modalRoot"></div>
+<div id="modalRoot2"></div>
 
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
