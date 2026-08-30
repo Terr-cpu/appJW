@@ -126,6 +126,7 @@ async function onSignedIn(){
     renderProyectos();
     renderMinisterio();
     renderTareas();
+    renderAsignaciones();
     renderDashboard();
     handleLaunchParams();
     checkReminders();
@@ -189,7 +190,6 @@ function activateTab(name){
   if (name === 'archivos' && !explorerLoaded && folderId) openExplorerFolder('root');
 }
 $$('.tab').forEach(tab => tab.addEventListener('click', () => activateTab(tab.dataset.tab)));
-document.getElementById('goProgramaBtn').addEventListener('click', () => activateTab('programa'));
 
 /* ---------- Menú hamburguesa (móvil) ---------- */
 function buildDrawer(){
@@ -351,8 +351,27 @@ function nowStamp(){
 }
 function tipoLabel(t){
   return t === 'entre-semana' ? 'Entre semana'
-    : t === 'publica' ? 'Reunión pública'
+    : t === 'publica' ? 'Fin de semana'
     : 'Documento';
+}
+
+/* Meses que cubre un análisis (["YYYY-MM", ...]) y su etiqueta legible. */
+function mesesDe(parsed){
+  const s = new Set();
+  (parsed && parsed.asignaciones || []).forEach(a => {
+    const iso = assignmentDateISO(a.fecha);
+    if (iso) s.add(iso.slice(0, 7));
+  });
+  return [...s].sort();
+}
+function mesesLabel(meses){
+  if (!meses || !meses.length) return '';
+  const mn = (ym) => { const [y, m] = ym.split('-'); return new Date(+y, +m - 1, 1).toLocaleDateString('es-ES', { month: 'long' }); };
+  const yr = (ym) => ym.slice(0, 4);
+  const a = meses[0], b = meses[meses.length - 1];
+  if (a === b) return `${mn(a)} ${yr(a)}`;
+  if (yr(a) === yr(b)) return `${mn(a)}–${mn(b)} ${yr(a)}`;
+  return `${mn(a)} ${yr(a)} – ${mn(b)} ${yr(b)}`;
 }
 
 /* ---------- Configuración de la app (carpeta destino, etc.) ---------- */
@@ -371,7 +390,7 @@ function pickFolder({ title = 'Elegir carpeta', startId = 'root', startName = 'M
   return new Promise((resolve) => {
     let stack = [{ id: startId, name: startName }];
     let done = false;
-    const finish = (v) => { if (!done) { done = true; closeModal(); resolve(v); } };
+    const finish = (v) => { if (!done) { done = true; closeModal2(); resolve(v); } };
     async function show(){
       const cur = stack[stack.length - 1];
       showSand('Cargando carpetas…');
@@ -384,7 +403,7 @@ function pickFolder({ title = 'Elegir carpeta', startId = 'root', startName = 'M
         showError('No se pudieron cargar las carpetas de Drive.'); finish(null); return;
       }
       hideSand();
-      renderModal(`
+      renderModal2(`
         <h3>${escapeHtml(title)}</h3>
         <div class="pk-bar">${stack.map((s, i) =>
           `<button class="ex-crumb" data-c="${i}">${escapeHtml(s.name)}</button>${i < stack.length - 1 ? '<span class="ex-sep">›</span>' : ''}`).join('')}</div>
@@ -398,8 +417,50 @@ function pickFolder({ title = 'Elegir carpeta', startId = 'root', startName = 'M
         </div>`);
       $('#pkCancel').addEventListener('click', () => finish(null));
       $('#pkChoose').addEventListener('click', () => finish({ id: cur.id, name: cur.name }));
-      $$('#modalRoot .pk-bar .ex-crumb').forEach(b => b.addEventListener('click', () => { stack = stack.slice(0, +b.dataset.c + 1); show(); }));
-      $$('#modalRoot .pk-list [data-f]').forEach(el => el.addEventListener('click', () => { stack.push({ id: el.dataset.f, name: el.dataset.n }); show(); }));
+      $$('#modalRoot2 .pk-bar .ex-crumb').forEach(b => b.addEventListener('click', () => { stack = stack.slice(0, +b.dataset.c + 1); show(); }));
+      $$('#modalRoot2 .pk-list [data-f]').forEach(el => el.addEventListener('click', () => { stack.push({ id: el.dataset.f, name: el.dataset.n }); show(); }));
+    }
+    show();
+  });
+}
+
+/* Selector de ARCHIVO de Drive (navega carpetas, elige un archivo). Devuelve
+   { id, name, mimeType, webViewLink } o null. */
+function pickDriveFile({ title = 'Elegir documento de Drive', startId = 'root', startName = 'Mi unidad' } = {}){
+  return new Promise((resolve) => {
+    let stack = [{ id: startId, name: startName }];
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; closeModal2(); resolve(v); } };
+    async function show(){
+      const cur = stack[stack.length - 1];
+      showSand('Cargando Drive…');
+      let files = [];
+      try { files = await driveList(cur.id); }
+      catch (err) {
+        hideSand();
+        if (/Drive API 40[13]/.test(err.message || '')) { reauthDrive(); finish(null); return; }
+        showError('No se pudo leer Drive.'); finish(null); return;
+      }
+      hideSand();
+      const folders = files.filter(f => f.mimeType === 'application/vnd.google-apps.folder');
+      const docs = files.filter(f => f.mimeType !== 'application/vnd.google-apps.folder');
+      renderModal2(`
+        <h3>${escapeHtml(title)}</h3>
+        <div class="pk-bar">${stack.map((s, i) =>
+          `<button class="ex-crumb" data-c="${i}">${escapeHtml(s.name)}</button>${i < stack.length - 1 ? '<span class="ex-sep">›</span>' : ''}`).join('')}</div>
+        <div class="pk-list">
+          ${folders.map(f => `<div class="ex-row" data-f="${escapeAttr(f.id)}" data-n="${escapeAttr(f.name)}">
+            <span class="ex-ic">📁</span><span class="ex-nm">${escapeHtml(f.name)}</span><span class="ex-go">›</span></div>`).join('')}
+          ${docs.map(f => `<div class="ex-row" data-pick="${escapeAttr(f.id)}" data-n="${escapeAttr(f.name)}" data-m="${escapeAttr(f.mimeType || '')}" data-l="${escapeAttr(f.webViewLink || '')}">
+            <span class="ex-ic">${fileIcon(f.mimeType)}</span><span class="ex-nm">${escapeHtml(f.name)}</span></div>`).join('')}
+          ${files.length ? '' : '<p class="empty-note">Carpeta vacía.</p>'}
+        </div>
+        <div class="modal-actions"><button class="btn btn-ghost" id="pkCancel">Cancelar</button></div>`);
+      $('#pkCancel').addEventListener('click', () => finish(null));
+      $$('#modalRoot2 .pk-bar .ex-crumb').forEach(b => b.addEventListener('click', () => { stack = stack.slice(0, +b.dataset.c + 1); show(); }));
+      $$('#modalRoot2 .pk-list [data-f]').forEach(el => el.addEventListener('click', () => { stack.push({ id: el.dataset.f, name: el.dataset.n }); show(); }));
+      $$('#modalRoot2 .pk-list [data-pick]').forEach(el => el.addEventListener('click', () =>
+        finish({ id: el.dataset.pick, name: el.dataset.n, mimeType: el.dataset.m, webViewLink: el.dataset.l })));
     }
     show();
   });
@@ -459,6 +520,7 @@ $('#pdfInput').addEventListener('change', async (e) => {
 
     const entry = {
       id: stamp, uploaded: new Date().toISOString(), mime, ext, tipo: currentParsed.tipo,
+      meses: mesesDe(currentParsed),
       fileId: meta.id, fileName: docName, parentId: dest.id, parentName: dest.name,
       parseId, parseName,
     };
@@ -466,8 +528,7 @@ $('#pdfInput').addEventListener('change', async (e) => {
     await persistCuadrantesIndex();
     currentCuadranteId = stamp;
 
-    $('#cuadranteMeta').textContent = `${tipoLabel(currentParsed.tipo)} · guardado en «${dest.name}»`;
-    { const gp = document.getElementById('goProgramaBtn'); if (gp) gp.hidden = false; }
+    $('#cuadranteMeta').textContent = `${tipoLabel(currentParsed.tipo)}${entry.meses.length ? ' · ' + mesesLabel(entry.meses) : ''} · guardado en «${dest.name}»`;
     renderCuadranteHistory();
     renderDigitalView(currentParsed);
     renderNameMatches();
@@ -559,7 +620,6 @@ async function openCuadrante(id){
   const entry = (id && cuadrantesIdx.find(c => c.id === id)) || cuadrantesIdx[0] || null;
   const meta = $('#cuadranteMeta');
   const toggle = $('#viewToggle');
-  const gp = document.getElementById('goProgramaBtn');
 
   if (!entry) {
     currentCuadranteId = null; currentDocBlob = null; currentParsed = null;
@@ -567,7 +627,6 @@ async function openCuadrante(id){
     setOriginalViewerEmpty();
     $('#digitalView').innerHTML = '';
     meta.textContent = '';
-    if (gp) gp.hidden = true;
     renderCuadranteHistory();
     renderDigitalView(null);
     renderNameMatches();
@@ -589,11 +648,6 @@ async function openCuadrante(id){
   currentDocUrl = URL.createObjectURL(blob);
   renderOriginalViewer(currentDocMime, currentDocUrl);
   toggle.hidden = false;
-  if (gp) gp.hidden = false;
-
-  const d = new Date(entry.uploaded);
-  meta.textContent = `${tipoLabel(entry.tipo)} · ${d.toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' })}`
-    + (entry.parentName ? ` · «${entry.parentName}»` : '');
 
   let parsed = null;
   if (entry.parseId) {
@@ -608,10 +662,13 @@ async function openCuadrante(id){
   }
   currentParsed = parsed;
 
-  if (entry.tipo === '?' && parsed.tipo && parsed.tipo !== 'desconocido') {
-    entry.tipo = parsed.tipo;
-    try { await persistCuadrantesIndex(); } catch (e) { /* no crítico */ }
-  }
+  let idxChanged = false;
+  if (entry.tipo === '?' && parsed.tipo && parsed.tipo !== 'desconocido') { entry.tipo = parsed.tipo; idxChanged = true; }
+  if (!entry.meses || !entry.meses.length) { entry.meses = mesesDe(parsed); idxChanged = true; }
+  if (idxChanged) { try { await persistCuadrantesIndex(); } catch (e) { /* no crítico */ } }
+
+  meta.textContent = `${tipoLabel(entry.tipo)}${entry.meses && entry.meses.length ? ' · ' + mesesLabel(entry.meses) : ''}`
+    + (entry.parentName ? ` · «${entry.parentName}»` : '');
 
   await mergeIntoHistorial(parsed);
   renderCuadranteHistory();
@@ -625,11 +682,10 @@ async function openCuadrante(id){
 async function deleteCuadrante(id){
   const entry = cuadrantesIdx.find(c => c.id === id);
   if (!entry) return;
-  const d = new Date(entry.uploaded).toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' });
   renderModal(`
     <h3>Borrar cuadrante</h3>
-    <p>Se eliminará de Drive el documento de <strong>${escapeHtml(d)}</strong> (${escapeHtml(tipoLabel(entry.tipo))}${entry.parentName ? ' · «' + escapeHtml(entry.parentName) + '»' : ''}).
-    Las asignaciones que ya se registraron se conservan en tu historial.</p>
+    <p>Se eliminará de Drive el cuadrante de <strong>${escapeHtml(tipoLabel(entry.tipo))}${entry.meses && entry.meses.length ? ' · ' + escapeHtml(mesesLabel(entry.meses)) : ''}</strong>${entry.parentName ? ' («' + escapeHtml(entry.parentName) + '»)' : ''}.
+    Las asignaciones que ya aprobaste (✓) se conservan.</p>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="modalCancel">Cancelar</button>
       <button class="btn btn-primary" id="modalConfirm" style="background:#B4432D; color:#FFF5EF;">Borrar</button>
@@ -670,12 +726,13 @@ function renderCuadranteHistory(){
     return;
   }
   box.hidden = false;
-  box.innerHTML = `<span class="ch-label">Cuadrantes guardados</span>
+  box.innerHTML = `<span class="ch-label">Cuadrantes</span>
     <div class="ch-list">${cuadrantesIdx.map(c => {
-      const d = new Date(c.uploaded).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' });
-      return `<div class="ch-item${c.id === currentCuadranteId ? ' active' : ''}" data-open="${escapeAttr(c.id)}">
-        <span class="ch-date">${escapeHtml(d)}</span>
-        <span class="ch-tipo">${escapeHtml(tipoLabel(c.tipo))}${c.parentName ? ' · ' + escapeHtml(c.parentName) : ''}</span>
+      const tl = tipoLabel(c.tipo);
+      const ml = mesesLabel(c.meses);
+      return `<div class="ch-item${c.id === currentCuadranteId ? ' active' : ''}" data-open="${escapeAttr(c.id)}" title="${escapeAttr(tl + (ml ? ' · ' + ml : ''))}">
+        <span class="ch-tipo ${c.tipo === 'entre-semana' ? 'is-es' : c.tipo === 'publica' ? 'is-fs' : ''}">${escapeHtml(tl)}</span>
+        <span class="ch-meses">${ml ? escapeHtml(ml) : 'sin fechas'}</span>
         <button class="ch-del" title="Borrar" data-del="${escapeAttr(c.id)}">🗑</button>
       </div>`;
     }).join('')}</div>
@@ -774,6 +831,7 @@ function refreshAssignmentsUI(){
   renderDigitalView(currentParsed);
   renderNameMatches();
   renderSearchMatches();
+  renderAsignaciones();
   updateHiddenBar();
 }
 
@@ -875,7 +933,7 @@ function renderOriginalViewer(mime, url){
 function jumpToPage(page){
   const embed = $('#pdfEmbed');
   if (!embed || !currentDocUrl) return;
-  activateTab('programa');
+  activateTab('cuadrante');
   $$('#viewToggle .vt-btn').forEach(b => b.classList.toggle('active', b.dataset.view === 'original'));
   $('#digitalView').hidden = true;
   $('#cuadranteViewer').hidden = false;
@@ -1419,11 +1477,11 @@ function delBtn(key){
   return `<button class="dv-del" title="Ocultar esta asignación" data-hk="${escapeAttr(key)}">✕</button>`;
 }
 
-const SECTION_STYLE = {
-  'tesoros de la biblia': { color: '#2F6F62', bg: '#EAF2EF' },
-  'seamos mejores maestros': { color: '#9B7623', bg: '#FBF3DC' },
-  'nuestra vida cristiana': { color: '#B4432D', bg: '#FBEAE5' },
-  'vivamos como cristianos': { color: '#B4432D', bg: '#FBEAE5' },
+const SECTION_CLASS = {
+  'tesoros de la biblia': 'sec-tesoros',
+  'seamos mejores maestros': 'sec-maestros',
+  'nuestra vida cristiana': 'sec-vida',
+  'vivamos como cristianos': 'sec-vida',
 };
 
 function rowMatchesSearch(names){
@@ -1439,8 +1497,8 @@ function renderMidweekRows(filas, tipo){
     if (f.seccion !== lastSeccion) {
       lastSeccion = f.seccion;
       if (f.seccion) {
-        const style = SECTION_STYLE[normalizeKey(f.seccion)] || { color: 'var(--ink-soft)', bg: 'var(--paper)' };
-        html += `<div class="dv-section" style="color:${style.color}; background:${style.bg}; border-color:${style.color}">${escapeHtml(f.seccion)}</div>`;
+        const cls = SECTION_CLASS[normalizeKey(f.seccion)] || '';
+        html += `<div class="dv-section ${cls}">${escapeHtml(f.seccion)}</div>`;
       }
     }
     const cat = categorizeMidweekRow(f);
@@ -1615,6 +1673,114 @@ function renderSearchMatches(){
 }
 
 /* =========================================================
+   Asignaciones aprobadas (savedList) — lista con crear / editar / borrar
+   ========================================================= */
+function savedIsoOf(s){
+  if (!s || !s.fecha) return '';
+  return /^\d{4}-\d{2}-\d{2}$/.test(s.fecha) ? s.fecha : (assignmentDateISO(s.fecha) || '');
+}
+
+function renderAsignaciones(){
+  const box = document.getElementById('asignacionesList');
+  if (!box) return;
+  if (!savedList.length) {
+    box.innerHTML = '<p class="empty-note">Aún no hay asignaciones aprobadas. Ve a <strong>Cuadrante</strong>, búscate por nombre y pulsa ✓ — o crea una con «+ Nueva».</p>';
+    return;
+  }
+  const rows = savedList
+    .map((s, i) => ({ s, i, iso: savedIsoOf(s) || '9999-99-99' }))
+    .sort((a, b) => a.iso.localeCompare(b.iso) || (a.s.hora || '').localeCompare(b.s.hora || ''));
+  const today = todayISO();
+  box.innerHTML = rows.map(({ s, i, iso }) => {
+    const fL = iso !== '9999-99-99'
+      ? new Date(iso + 'T00:00').toLocaleDateString('es-ES', { weekday: 'short', day: '2-digit', month: 'short' })
+      : 'sin fecha';
+    const past = iso !== '9999-99-99' && iso < today;
+    return `<div class="asg-item${past ? ' asg-past' : ''}">
+      <div class="asg-body">
+        <div class="asg-line1">
+          <span class="asg-cat">${escapeHtml(s.categoria || 'Asignación')}</span>
+          ${s.tipo ? `<span class="asg-tipo ${s.tipo === 'entre-semana' ? 'is-es' : 'is-fs'}">${escapeHtml(tipoLabel(s.tipo))}</span>` : ''}
+        </div>
+        <div class="asg-meta">
+          <span class="asg-date">${escapeHtml(fL)}${s.hora ? ' · ' + escapeHtml(s.hora) : ''}</span>
+          ${s.nombreTexto ? `<span class="asg-nom">${escapeHtml(s.nombreTexto)}</span>` : ''}
+        </div>
+        ${s.notes ? `<div class="asg-notes">${escapeHtml(s.notes)}</div>` : ''}
+      </div>
+      <span class="ev-actions">
+        <button class="icon-btn" title="Editar" data-edit-a="${i}">✎</button>
+        <button class="icon-btn" title="Eliminar" data-del-a="${i}">✕</button>
+      </span>
+    </div>`;
+  }).join('');
+  box.querySelectorAll('[data-edit-a]').forEach(b => b.addEventListener('click', () => openAsignacionModal(+b.dataset.editA)));
+  box.querySelectorAll('[data-del-a]').forEach(b => b.addEventListener('click', () => deleteAsignacion(+b.dataset.delA)));
+}
+
+document.getElementById('addAsignacionBtn').addEventListener('click', () => openAsignacionModal());
+
+function openAsignacionModal(i){
+  const s = (typeof i === 'number' && i >= 0) ? savedList[i] : null;
+  const iso = s ? savedIsoOf(s) : '';
+  const hh = s && s.hora && /^\d{1,2}:\d{2}$/.test(s.hora) ? s.hora.replace(/^(\d):/, '0$1:') : '';
+  renderModal(`
+    <h3>${s ? 'Editar asignación' : 'Nueva asignación'}</h3>
+    <div class="field"><label>Qué es</label><input id="aCat" value="${s ? escapeAttr(s.categoria || '') : ''}" placeholder="Lectura de la Biblia, Discurso público…"></div>
+    <div class="field" style="flex-direction:row; gap:10px;">
+      <div style="flex:1; display:flex; flex-direction:column; gap:5px;"><label>Fecha</label><input id="aDate" type="date" value="${iso}"></div>
+      <div style="flex:1; display:flex; flex-direction:column; gap:5px;"><label>Hora</label><input id="aTime" type="time" value="${hh}"></div>
+    </div>
+    <div class="field"><label>Reunión</label>
+      <select id="aTipo">
+        <option value=""${!s || !s.tipo ? ' selected' : ''}>—</option>
+        <option value="entre-semana"${s && s.tipo === 'entre-semana' ? ' selected' : ''}>Entre semana</option>
+        <option value="publica"${s && s.tipo === 'publica' ? ' selected' : ''}>Fin de semana</option>
+      </select>
+    </div>
+    <div class="field"><label>Persona(s)</label><input id="aNom" value="${s ? escapeAttr(s.nombreTexto || '') : ''}" placeholder="nombre"></div>
+    <div class="field"><label>Notas</label><textarea id="aNotes">${s ? escapeHtml(s.notes || '') : ''}</textarea></div>
+    <div class="modal-actions">
+      ${s ? '<button class="btn btn-ghost" id="modalDelete" style="color:#B4432D;">Eliminar</button>' : ''}
+      <button class="btn btn-ghost" id="modalCancel">Cancelar</button>
+      <button class="btn btn-primary" id="modalSave">Guardar</button>
+    </div>`);
+  $('#modalCancel').addEventListener('click', closeModal);
+  if (s) $('#modalDelete').addEventListener('click', () => { deleteAsignacion(i); closeModal(); });
+  $('#modalSave').addEventListener('click', async () => {
+    const cat = $('#aCat').value.trim();
+    if (!cat) { showError('Indica qué es la asignación.'); return; }
+    const data = {
+      key: s ? s.key : 'man_' + Math.random().toString(36).slice(2, 9),
+      tipo: $('#aTipo').value || null,
+      fecha: $('#aDate').value || '',
+      hora: $('#aTime').value || '',
+      categoria: cat,
+      nombreTexto: $('#aNom').value.trim(),
+      notes: $('#aNotes').value.trim(),
+      manual: s ? (s.manual || /^man_/.test(s.key)) : true,
+    };
+    if (s) savedList[i] = { ...s, ...data }; else savedList.push(data);
+    closeModal();
+    showSand('Guardando en Drive…');
+    try { await persistGuardadas(); } catch (e) { showError('No se pudo guardar.'); } finally { hideSand(); }
+    renderAsignaciones();
+    await syncMyAssignmentsToCalendar();
+    renderDashboard();
+  });
+}
+
+async function deleteAsignacion(i){
+  if (i < 0 || i >= savedList.length) return;
+  savedList.splice(i, 1);
+  showSand('Guardando…');
+  try { await persistGuardadas(); } catch (e) { showError('No se pudo guardar.'); } finally { hideSand(); }
+  refreshAssignmentsUI();
+  await syncMyAssignmentsToCalendar();
+  renderDashboard();
+}
+
+/* =========================================================
    Calendario
    ========================================================= */
 async function loadEvents(){
@@ -1640,6 +1806,7 @@ const MONTHS_ES = {
    Entre semana: "2026/10/14"   ·   Pública: "06 SEPTIEMBRE 2026" */
 function assignmentDateISO(fecha){
   if (!fecha) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(fecha)) return fecha; // ya viene en ISO (asignaciones manuales)
   let m = String(fecha).match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
   if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
   m = String(fecha).match(/^(\d{1,2})\s+([A-Za-zÁÉÍÓÚÜÑáéíóúüñ.]+)\s+(\d{4})$/);
@@ -1953,19 +2120,38 @@ function renderProyectos(){
   wrap.innerHTML = proyectos
     .slice()
     .sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''))
-    .map(p => `
+    .map(p => {
+      const pt = tareas.filter(t => t.proyectoId === p.id);
+      const ptDone = pt.filter(t => t.done).length;
+      return `
       <div class="proyecto-card" data-id="${p.id}">
         <h3>${escapeHtml(p.titulo)}</h3>
         <p class="fecha">${p.fecha ? new Date(p.fecha + 'T00:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' }) : ''}</p>
-        ${(p.partes || []).map(pt => `<div class="parte-row"><span>${escapeHtml(pt.titulo)}</span><span class="asignado">${escapeHtml(pt.asignado || '')}</span></div>`).join('') || '<p class="empty-note">Sin partes añadidas.</p>'}
+        ${(p.partes || []).map(x => `<div class="parte-row"><span>${escapeHtml(x.titulo)}</span><span class="asignado">${escapeHtml(x.asignado || '')}</span></div>`).join('') || '<p class="empty-note">Sin partes añadidas.</p>'}
+        <div class="pr-tasks">
+          <div class="pr-tasks-h">Tareas del proyecto${pt.length ? ` <span>${ptDone}/${pt.length}</span>` : ''}</div>
+          ${pt.length ? `<div class="pr-bar"><i style="width:${pt.length ? Math.round(ptDone / pt.length * 100) : 0}%"></i></div>` : ''}
+          ${pt.sort((a, b) => (a.due || '9999').localeCompare(b.due || '9999')).map(t => `
+            <label class="pr-task${t.done ? ' done' : ''}">
+              <input type="checkbox" data-pt-toggle="${escapeAttr(t.id)}" ${t.done ? 'checked' : ''}>
+              <span>${escapeHtml(t.title)}${t.due ? ` · ${new Date(t.due + 'T00:00').toLocaleDateString('es-ES', { day: '2-digit', month: 'short' })}` : ''}</span>
+              <button class="icon-btn" data-pt-edit="${escapeAttr(t.id)}">✎</button>
+            </label>`).join('')}
+          <button class="btn btn-ghost pr-add" data-pt-add="${p.id}" data-pt-name="${escapeAttr(p.titulo)}">+ Tarea</button>
+        </div>
         <div class="proyecto-actions">
           <button class="btn btn-ghost" data-edit-p="${p.id}">Editar</button>
           <button class="btn btn-ghost" data-del-p="${p.id}" style="color:#B4432D;">Eliminar</button>
         </div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
 
   wrap.querySelectorAll('[data-edit-p]').forEach(b => b.addEventListener('click', () => openProyectoModal(b.dataset.editP)));
   wrap.querySelectorAll('[data-del-p]').forEach(b => b.addEventListener('click', () => deleteProyecto(b.dataset.delP)));
+  wrap.querySelectorAll('[data-pt-toggle]').forEach(c => c.addEventListener('change', () => toggleTarea(c.dataset.ptToggle)));
+  wrap.querySelectorAll('[data-pt-edit]').forEach(b => b.addEventListener('click', (e) => { e.preventDefault(); openTareaModal(b.dataset.ptEdit); }));
+  wrap.querySelectorAll('[data-pt-add]').forEach(b => b.addEventListener('click', () =>
+    openTareaModal(null, { proyectoId: b.dataset.ptAdd, project: b.dataset.ptName })));
   renderDashboard();
 }
 
@@ -2238,12 +2424,14 @@ function tareaItemHtml(t){
       </div>
       <div class="tk-meta">
         ${dueBadge(t)}
-        ${t.project ? `<span class="tk-tag">#${escapeHtml(t.project)}</span>` : ''}
+        ${t.project ? `<span class="tk-tag">${t.proyectoId ? '🗂 ' : '#'}${escapeHtml(t.project)}</span>` : ''}
         ${(t.labels || []).map(l => `<span class="tk-tag tk-lab">@${escapeHtml(l)}</span>`).join('')}
         ${subs.length ? `<span class="tk-sub-count">${subDone}/${subs.length}</span>` : ''}
       </div>
       ${subs.length ? `<div class="tk-subs">${subs.map(s => `
         <label class="tk-subrow${s.done ? ' done' : ''}"><input type="checkbox" data-sub="${escapeAttr(t.id)}|${escapeAttr(s.id)}" ${s.done ? 'checked' : ''}><span>${escapeHtml(s.title)}</span></label>`).join('')}</div>` : ''}
+      ${(t.attachments || []).length ? `<div class="tk-att">${t.attachments.map(a =>
+        `<button class="tk-att-chip" data-att-id="${escapeAttr(a.id)}" data-att-m="${escapeAttr(a.mimeType || '')}" data-att-l="${escapeAttr(a.webViewLink || '')}" data-att-n="${escapeAttr(a.name)}">📎 ${escapeHtml(a.name)}</button>`).join('')}</div>` : ''}
       ${t.notes ? `<div class="tk-notes">${escapeHtml(t.notes)}</div>` : ''}
     </div>
     <span class="ev-actions">
@@ -2310,6 +2498,8 @@ function renderTareas(){
   list.querySelectorAll('[data-sub]').forEach(c => c.addEventListener('change', () => toggleSubtarea(c.dataset.sub)));
   list.querySelectorAll('[data-edit-t]').forEach(b => b.addEventListener('click', () => openTareaModal(b.dataset.editT)));
   list.querySelectorAll('[data-del-t]').forEach(b => b.addEventListener('click', () => deleteTarea(b.dataset.delT)));
+  list.querySelectorAll('[data-att-id]').forEach(b => b.addEventListener('click', () =>
+    openDriveFile(b.dataset.attId, b.dataset.attM, b.dataset.attL, b.dataset.attN)));
   renderDashboard();
 }
 
@@ -2318,7 +2508,7 @@ document.querySelectorAll('#tareasNav .tk-vbtn').forEach(b =>
 document.getElementById('addTareaBtn').addEventListener('click', () => openTareaModal());
 
 /* tras tocar tareas: refresca su vista y también el calendario/próximo (las que tienen fecha) */
-function refreshTareas(){ renderTareas(); renderCalendar(); renderUpcoming(); }
+function refreshTareas(){ renderTareas(); renderCalendar(); renderUpcoming(); renderProyectos(); }
 
 async function toggleTarea(id){
   const t = tareas.find(x => x.id === id);
@@ -2343,9 +2533,13 @@ async function deleteTarea(id){
   try { await persistTareas(); refreshTareas(); } finally { hideSand(); }
 }
 
-function openTareaModal(id){
+function openTareaModal(id, preset){
   const t = id ? tareas.find(x => x.id === id) : null;
   let subs = t ? (t.subtasks || []).map(s => ({ ...s })) : [];
+  let attach = t ? (t.attachments || []).map(a => ({ ...a })) : [];
+  const proyId = t ? t.proyectoId || null : (preset && preset.proyectoId) || null;
+  const projVal = t ? (t.project || '') : (preset && preset.project) || '';
+
   const subsHtml = () => subs.map((s, i) => `
     <div class="parte-input-row" data-i="${i}">
       <input class="st-title" value="${escapeAttr(s.title)}" placeholder="Subtarea">
@@ -2354,6 +2548,9 @@ function openTareaModal(id){
   const readSubs = () => $$('#stWrap .st-title').map((inp, i) => ({
     id: (subs[i] && subs[i].id) || uid('s_'), title: inp.value, done: subs[i] ? !!subs[i].done : false,
   }));
+  const attHtml = () => attach.length
+    ? attach.map((a, i) => `<span class="tk-att-chip in-modal">📎 ${escapeHtml(a.name)}<button data-rm-at="${i}" class="rm">✕</button></span>`).join('')
+    : '<span class="empty-note" style="padding:0;">Ninguno</span>';
 
   renderModal(`
     <h3>${t ? 'Editar tarea' : 'Nueva tarea'}</h3>
@@ -2370,19 +2567,35 @@ function openTareaModal(id){
       </select>
     </div>
     <div class="field"><label>Proyecto / lista</label>
-      <input id="tProj" list="tProjList" value="${t ? escapeAttr(t.project || '') : ''}" placeholder="p. ej. Congregación">
+      <input id="tProj" list="tProjList" value="${escapeAttr(projVal)}" placeholder="p. ej. Congregación" ${proyId ? 'readonly' : ''}>
       <datalist id="tProjList">${tareaProjects().map(p => `<option value="${escapeAttr(p)}"></option>`).join('')}</datalist>
     </div>
     <div class="field"><label>Etiquetas (separadas por comas)</label>
       <input id="tLabels" value="${t ? escapeAttr((t.labels || []).join(', ')) : ''}" placeholder="urgente, ministerio"></div>
     <div class="field"><label>Subtareas</label><div id="stWrap">${subsHtml()}</div>
       <button class="btn btn-ghost" id="addStBtn" style="align-self:flex-start;">+ Añadir subtarea</button></div>
+    <div class="field"><label>Documentos de Drive</label>
+      <div id="atWrap" class="tk-att">${attHtml()}</div>
+      <button class="btn btn-ghost" id="addAtBtn" style="align-self:flex-start;">📎 Adjuntar de Drive</button></div>
     <div class="field"><label>Notas</label><textarea id="tNotes">${t ? escapeHtml(t.notes || '') : ''}</textarea></div>
     <div class="modal-actions">
       ${t ? '<button class="btn btn-ghost" id="modalDelete" style="color:#B4432D;">Eliminar</button>' : ''}
       <button class="btn btn-ghost" id="modalCancel">Cancelar</button>
       <button class="btn btn-primary" id="modalSave">Guardar</button>
     </div>`);
+
+  function bindAt(){
+    $$('#atWrap [data-rm-at]').forEach(b => b.addEventListener('click', () => {
+      attach.splice(+b.dataset.rmAt, 1); $('#atWrap').innerHTML = attHtml(); bindAt();
+    }));
+  }
+  bindAt();
+  $('#addAtBtn').addEventListener('click', async () => {
+    const f = await pickDriveFile({ title: 'Adjuntar documento de Drive' });
+    if (!f) return;
+    if (!attach.some(a => a.id === f.id)) attach.push({ id: f.id, name: f.name, mimeType: f.mimeType, webViewLink: f.webViewLink });
+    $('#atWrap').innerHTML = attHtml(); bindAt();
+  });
 
   function bindSt(){
     $$('#stWrap [data-rm-st]').forEach(b => b.addEventListener('click', () => {
@@ -2413,15 +2626,17 @@ function openTareaModal(id){
       time: $('#tTime').value || '',
       priority: parseInt($('#tPrio').value, 10) || 2,
       project: $('#tProj').value.trim(),
+      proyectoId: proyId || null,
       labels,
       notes: $('#tNotes').value.trim(),
       subtasks,
+      attachments: attach,
       createdAt: t ? t.createdAt || new Date().toISOString() : new Date().toISOString(),
     };
     if (t) Object.assign(t, data); else tareas.push(data);
     closeModal();
     showSand('Guardando en Drive…');
-    try { await persistTareas(); refreshTareas(); } finally { hideSand(); }
+    try { await persistTareas(); refreshTareas(); renderProyectos(); } finally { hideSand(); }
   });
 }
 
@@ -2679,6 +2894,13 @@ function renderModal(innerHtml){
   $('#backdrop').addEventListener('click', (e) => { if (e.target.id === 'backdrop') closeModal(); });
 }
 function closeModal(){ $('#modalRoot').innerHTML = ''; }
+
+/* Segundo nivel de modal (para selectores que se abren sobre otro modal). */
+function renderModal2(innerHtml){
+  $('#modalRoot2').innerHTML = `<div class="modal-backdrop lvl2" id="backdrop2"><div class="modal">${innerHtml}</div></div>`;
+  $('#backdrop2').addEventListener('click', (e) => { if (e.target.id === 'backdrop2') closeModal2(); });
+}
+function closeModal2(){ $('#modalRoot2').innerHTML = ''; }
 
 /* =========================================================
    Utilidades
