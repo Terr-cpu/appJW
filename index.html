@@ -24,6 +24,7 @@
 </div>
 
 <header class="topbar">
+  <button id="hamburger" class="hamburger" aria-label="Menú" hidden>☰</button>
   <div class="brand">
     <svg class="brand-mark" viewBox="0 0 40 64" aria-hidden="true"><path d="M4 2h32v10c0 8-14 12-14 20s14 12 14 20v10H4V52c0-8 14-12 14-20S4 20 4 12V2z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/></svg>
     <div>
@@ -32,6 +33,7 @@
     </div>
   </div>
   <div class="account" id="accountArea">
+    <button id="themeToggle" class="icon-btn theme-toggle" title="Modo claro / oscuro" aria-label="Cambiar tema">🌙</button>
     <button id="signInBtn" class="btn btn-primary">Entrar con Google</button>
     <div id="signedInInfo" class="signed-in" hidden>
       <img id="userAvatar" alt="" class="avatar">
@@ -51,6 +53,10 @@
   <button class="tab" data-tab="proyectos"><span class="tab-i">🗂️</span>Proyectos</button>
   <button class="tab" data-tab="archivos"><span class="tab-i">📁</span>Archivos</button>
 </nav>
+
+<div id="navDrawer" class="nav-drawer" hidden>
+  <div class="nd-panel" id="ndPanel"></div>
+</div>
 
 <main id="app" hidden>
 
@@ -74,6 +80,13 @@
       <input type="text" id="myNameInput" placeholder="p. ej. Juan Martín">
     </div>
     <div id="nameMatches" class="name-matches"></div>
+
+    <div class="name-search">
+      <label for="searchNameInput">Buscar asignación por nombre</label>
+      <input type="text" id="searchNameInput" placeholder="cualquier nombre del cuadrante actual">
+    </div>
+    <div id="searchMatches" class="name-matches" hidden></div>
+
     <div id="hiddenBar" class="hidden-bar" hidden></div>
     <button id="goProgramaBtn" class="btn btn-ghost" hidden>Ver programa completo →</button>
   </section>
