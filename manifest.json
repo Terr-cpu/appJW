@@ -1,6 +1,6 @@
 {
-  "name": "Hourglass · Panel de la congregación",
-  "short_name": "Hourglass",
+  "name": "Agenda JW",
+  "short_name": "Agenda JW",
   "description": "Cuadrante de asignaciones, calendario, tareas y horas de ministerio — todo guardado en tu Google Drive.",
   "start_url": "./index.html",
   "scope": "./",
