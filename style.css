@@ -328,6 +328,19 @@ mark, .nm-detalle mark{
 .cal-day.has-event{cursor:pointer;}
 .cal-day.has-event:hover{background:color-mix(in srgb, var(--sand) 22%, var(--surface));}
 
+.cal-settings{
+  margin-top:14px; background:var(--surface); border:1px solid var(--line);
+  border-radius:12px; padding:12px 14px; display:flex; flex-direction:column; gap:9px;
+}
+.cs-row{display:flex; align-items:center; gap:9px; font-size:.85rem; flex-wrap:wrap;}
+.cs-row input[type=checkbox]{accent-color:var(--teal); width:auto;}
+.cs-row select{
+  font-family:var(--font-body); font-size:.82rem; padding:6px 8px; border-radius:8px;
+  border:1px solid var(--line); background:var(--paper-2); color:var(--ink);
+}
+.cs-row .btn{padding:5px 12px; font-size:.75rem;}
+.cs-hint{font-size:.74rem; color:var(--ink-soft); margin:0;}
+
 .upcoming{margin-top:24px;}
 .upcoming h3{font-size:1rem; margin-bottom:10px;}
 .upcoming-list{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px;}
