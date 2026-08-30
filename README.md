@@ -11,14 +11,15 @@ Al iniciar sesión con Google, la app crea (o reutiliza) una carpeta llamada **"
 `historial-asignaciones.json`, `asignaciones-ocultas.json`, `eventos.json`, `proyectos.json`,
 `ministerio.json`, `tareas.json`, `explorador-favoritos.json`.
 
-Scopes usados:
-- `drive.file` — para leer y escribir **solo** los archivos que la propia app crea.
-- `drive.readonly` — solo para el **explorador de archivos** (pestaña «Archivos»), que lista y previsualiza tus carpetas y documentos en modo lectura.
+Scope usado: **`https://www.googleapis.com/auth/drive`** (lectura y escritura en Drive). Hace falta
+para poder **elegir en qué carpeta guardar cada cuadrante** (p. ej. `JW/Cuadrantes`) y para el
+explorador de archivos. Los datos internos de la app siguen en su carpeta **"Agenda JW"**; los
+documentos de cuadrante van a la carpeta que tú elijas (se recuerda como predeterminada).
 
 ## Puesta en marcha (una sola vez)
 
 1. **Google Cloud Console** → crea un proyecto → *APIs & Services* → *Library* → activa **Google Drive API**.
-2. *APIs & Services* → *OAuth consent screen* → tipo **External**, rellena lo básico, en *Scopes* añade `.../auth/drive.file` y `.../auth/drive.readonly`, y añade tu correo como *test user* (así no necesitas pasar la verificación de Google mientras lo uses tú/tu congregación en modo prueba).
+2. *APIs & Services* → *OAuth consent screen* → tipo **External**, rellena lo básico, en *Scopes* añade `.../auth/drive`, y añade tu correo como *test user* (así no necesitas pasar la verificación de Google mientras lo uses tú/tu congregación en modo prueba). El scope `drive` es "restringido": en modo prueba con test users funciona sin verificación.
 3. *APIs & Services* → *Credentials* → **Create credentials → OAuth client ID** → tipo **Web application**.
    - En *Authorized JavaScript origins* añade la URL donde publiques la app, por ejemplo:
      `https://tu-usuario.github.io`
