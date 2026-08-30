@@ -1,6 +1,6 @@
 /* Service worker mínimo: cachea el "shell" para que la app abra sin conexión.
    Los datos siempre van a Google Drive por red; aquí NO se cachea nada de Google. */
-const CACHE = 'hourglass-v3';
+const CACHE = 'agenda-jw-v1';
 const SHELL = [
   './',
   './index.html',
