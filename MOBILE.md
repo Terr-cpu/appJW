@@ -1,289 +1,139 @@
-# Hourglass como app Android privada (APK) con widgets
+# Agenda JW — APK Android privada (Capacitor) con widgets y alertas nativas
 
-Esta guía convierte la web en una **APK que instalas tú por sideload** (sin publicar en Play
-Store) usando **Capacitor**, y añade **widgets nativos** para la pantalla de inicio.
+La web sigue funcionando igual en GitHub Pages. Esto la empaqueta como **APK que
+instalas tú por sideload** (sin Play Store), con:
 
-> Resumen honesto del coste:
-> - Empaquetar la APK con Capacitor: ~1–2 h la primera vez.
-> - Rehacer el **login de Google** para que funcione dentro de la app: es el punto delicado
->   (hay que crear un cliente OAuth de **Android** en Google Cloud y cambiar ~20 líneas de `app.js`).
-> - **Widgets nativos**: código Kotlin + probar en un móvil real. ~1 día por los 3 widgets.
+- **Login de Google nativo** (obligatorio: Google bloquea OAuth dentro de un WebView).
+- **Alertas nativas** que suenan con la app cerrada (`@capacitor/local-notifications`).
+- **3 widgets** de pantalla de inicio: *Hoy*, *Próxima reunión*, *Horas del mes*.
+- (La sincronización con **Google Calendar** ya funciona igual en web y en APK.)
 
----
-
-## 0. Requisitos en tu PC (Windows vale)
-
-- **Node.js 18+** — https://nodejs.org
-- **JDK 17** (Temurin) — https://adoptium.net
-- **Android Studio** (incluye el SDK de Android) — https://developer.android.com/studio
-  - Ábrelo una vez y deja que instale *Android SDK Platform* + *Build-Tools*.
+El código JS ya está preparado (detecta si corre en Capacitor). Aquí solo montas el
+proyecto Android y pegas 6 archivos Kotlin/XML de la carpeta [`mobile/`](mobile/).
 
 ---
 
-## 1. Añadir Capacitor al proyecto
+## 0. En tu PC (Windows sirve)
+
+| Requisito | Enlace |
+|---|---|
+| **Node.js 18+** | https://nodejs.org |
+| **JDK 17** (Temurin) | https://adoptium.net |
+| **Android Studio** (incluye el SDK) | https://developer.android.com/studio → ábrelo una vez y deja que instale *Platform* + *Build-Tools* |
+
+---
+
+## 1. Instalar dependencias y crear el proyecto Android
 
 Desde la carpeta del repo:
 
 ```bash
-npm init -y
-npm install @capacitor/core @capacitor/cli @capacitor/android
-npx cap init "Hourglass" "org.hourglass.panel" --web-dir "."
+npm install
+npm run cap:add
 ```
 
-Esto crea `capacitor.config.json`. Déjalo así (la web se sirve desde dentro de la app):
+`npm run cap:add` copia la web a `www/` (solo los archivos necesarios, deja fuera
+`muestras/`) y crea `android/`.
 
-```json
-{
-  "appId": "org.hourglass.panel",
-  "webDir": ".",
-  "server": { "androidScheme": "https" }
-}
-```
-
-`webDir: "."` empaqueta `index.html`, `app.js`, `style.css`, `manifest.json`, `sw.js`,
-`icon-*.png`. Si no quieres meter la carpeta `muestras/` en la APK, muévela fuera o crea
-un `www/` con solo los archivos necesarios y pon `"webDir": "www"`.
-
-```bash
-npx cap add android
-```
-
-Iconos de la app (usa el PNG que ya hay como fuente):
+Iconos de la app (usa el PNG grande como fuente):
 
 ```bash
 npm install -D @capacitor/assets
-npx capacitor-assets generate --iconBackgroundColor "#1E2A38" --iconBackgroundColorDark "#1E2A38"
+mkdir resources && copy icon-512.png resources\icon.png
+npx capacitor-assets generate --android --iconBackgroundColor "#1C2A3A" --iconBackgroundColorDark "#1C2A3A"
 ```
-(pon `icon-512.png` en `resources/icon.png` antes, 1024×1024 mejor).
 
 ---
 
-## 2. El login de Google dentro de la APK  ⚠️ importante
-
-El código actual usa **Google Identity Services (GIS) para web**:
-
-```js
-tokenClient = google.accounts.oauth2.initTokenClient({ client_id, scope, callback });
-tokenClient.requestAccessToken({ prompt: 'consent' });
-```
-
-Dentro de un WebView de Android, Google **bloquea** ese consentimiento
-(`disallowed_useragent`). Hay que hacer el login con el **SDK nativo** y pasarle a la app
-el `access_token` que ya usa el resto del código.
-
-### 2.1 En Google Cloud Console
+## 2. Login de Google (Google Cloud Console)  ⚠️ imprescindible
 
 1. *APIs & Services → Credentials → Create credentials → OAuth client ID* → tipo **Android**.
-   - *Package name*: `org.hourglass.panel`
-   - *SHA-1*: saca el de tu keystore de depuración y el de release:
+   - *Package name*: `org.agendajw.app`
+   - *SHA-1* de tu keystore de depuración:
      ```bash
      keytool -list -v -keystore "%USERPROFILE%\.android\debug.keystore" -alias androiddebugkey -storepass android -keypass android
      ```
-2. Mantén también el cliente **Web** que ya tienes (su Client ID se usa como
-   `serverClientId`).
-3. En *OAuth consent screen* añade tu correo como *test user* (ya lo tienes).
+     (y repite con el SHA-1 de tu keystore de **release** cuando lo crees en el paso 5).
+2. Mantén el cliente **Web** que ya tienes: su Client ID va como `serverClientId` en
+   `capacitor.config.json` (ya está puesto).
+3. *OAuth consent screen → Scopes*: deben estar `.../auth/drive` y `.../auth/calendar`.
+   *Test users*: tu correo.
 
-### 2.2 Plugin de login
-
-```bash
-npm install @codetrix-studio/capacitor-google-auth
-```
-
-`capacitor.config.json`:
-
-```json
-{
-  "appId": "org.hourglass.panel",
-  "webDir": ".",
-  "plugins": {
-    "GoogleAuth": {
-      "scopes": ["https://www.googleapis.com/auth/drive"],
-      "serverClientId": "989709837307-449de0hk767r7lplvjfc4ilfb6smnpfd.apps.googleusercontent.com",
-      "forceCodeForRefreshToken": true
-    }
-  }
-}
-```
-
-### 2.3 Cambios en `app.js`
-
-Envuelve el login para que use el plugin cuando corre dentro de Capacitor y siga usando GIS
-en el navegador normal:
-
-```js
-const IS_NATIVE = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
-
-async function nativeSignIn() {
-  const { GoogleAuth } = window.Capacitor.Plugins;
-  await GoogleAuth.initialize();               // una vez
-  const user = await GoogleAuth.signIn();
-  accessToken = user.authentication.accessToken;
-  localStorage.setItem('hg_token', accessToken);
-  localStorage.setItem('hg_token_ts', Date.now().toString());
-  await onSignedIn();
-}
-
-// en initAuth():
-$('#signInBtn').addEventListener('click', () => {
-  if (IS_NATIVE) nativeSignIn();
-  else tokenClient.requestAccessToken({ prompt: 'consent' });
-});
-```
-
-Cuando el token caduque (~50 min) el `driveFetch` dará 401 → vuelve a llamar a
-`nativeSignIn()` (o `GoogleAuth.refresh()`).
-
-Todo lo demás (llamadas REST a Drive con `fetch` y `Authorization: Bearer`) **no cambia**.
+`app.js` ya detecta Capacitor y usa el plugin nativo `GoogleAuth` en vez de GIS.
 
 ---
 
-## 3. Compilar la APK
+## 3. Widgets + alertas nativas (pegar 6 archivos)
 
-```bash
-npx cap sync android
-npx cap open android      # abre Android Studio
-```
+Copia desde [`mobile/`](mobile/) a `android/app/src/main/`:
 
-En Android Studio:
-- **Debug** para probar: *Run ▶* con el móvil conectado (Depuración USB activada).
-- **APK firmada** para instalar sin cable:
-  *Build → Generate Signed Bundle / APK → APK*, crea un keystore, guarda la contraseña,
-  elige *release*. La APK sale en `android/app/release/app-release.apk`.
+| Origen | Destino |
+|---|---|
+| `mobile/java/WidgetBridge.kt` | `java/org/agendajw/app/WidgetBridge.kt` |
+| `mobile/java/Widgets.kt` | `java/org/agendajw/app/Widgets.kt` |
+| `mobile/res/layout/widget_common.xml` | `res/layout/widget_common.xml` |
+| `mobile/res/xml/hoy_widget_info.xml` | `res/xml/hoy_widget_info.xml` (y **cópialo** como `reunion_widget_info.xml` y `horas_widget_info.xml`) |
 
-Instálala en el móvil: cópiala y ábrela (permite "instalar apps desconocidas" para tu
-gestor de archivos). No hace falta Play Store.
+Luego:
 
----
+1. **Registrar el plugin.** En `java/org/agendajw/app/MainActivity.java`, dentro de `onCreate`
+   antes de `super.onCreate`, añade:
+   ```java
+   registerPlugin(WidgetBridge.class);
+   ```
+2. **Manifest.** Pega los 3 `<receiver>` de `mobile/AndroidManifest-snippet.xml` dentro de
+   `<application>` en `res/../AndroidManifest.xml`, y los 3 `<uses-permission>` (comentados en
+   ese archivo) arriba del todo.
+3. **Abrir en la pestaña correcta al pulsar un widget.** En `MainActivity.java`:
+   ```java
+   @Override
+   public void onNewIntent(android.content.Intent intent) {
+     super.onNewIntent(intent);
+     String go = intent.getStringExtra("go");
+     if (go != null && getBridge() != null) {
+       getBridge().getWebView().post(() ->
+         getBridge().getWebView().evaluateJavascript(
+           "window.activateTab && activateTab('" + go + "')", null));
+     }
+   }
+   ```
+4. Icono de estado para notificaciones: crea `res/drawable/ic_stat_icon.xml` (un icono
+   blanco simple) o cambia `smallIcon` en `capacitor.config.json` por `ic_launcher`.
 
-## 4. Widgets de pantalla de inicio (nativos)
-
-Los widgets son código Android; el WebView no puede pintarlos. El patrón:
-
-1. La web guarda un resumen en `SharedPreferences` cada vez que cambian los datos.
-2. Un `AppWidgetProvider` en Kotlin lee ese resumen y pinta el widget.
-3. Tocar el widget abre la app en la pestaña correspondiente (`?go=...`, ya soportado).
-
-### 4.1 Puente web → nativo (plugin mínimo)
-
-`android/app/src/main/java/org/hourglass/panel/WidgetBridge.kt`:
-
-```kotlin
-package org.hourglass.panel
-
-import com.getcapacitor.*
-import com.getcapacitor.annotation.CapacitorPlugin
-import android.appwidget.AppWidgetManager
-import android.content.ComponentName
-
-@CapacitorPlugin(name = "WidgetBridge")
-class WidgetBridge : Plugin() {
-  @PluginMethod
-  fun save(call: PluginCall) {
-    val ctx = context
-    ctx.getSharedPreferences("hg_widgets", 0).edit()
-      .putString("hoy", call.getString("hoy", "[]"))
-      .putString("reunion", call.getString("reunion", ""))
-      .putString("horas", call.getString("horas", ""))
-      .apply()
-    val mgr = AppWidgetManager.getInstance(ctx)
-    for (cls in listOf(HoyWidget::class.java, ReunionWidget::class.java, HorasWidget::class.java)) {
-      val ids = mgr.getAppWidgetIds(ComponentName(ctx, cls))
-      ctx.sendBroadcast(android.content.Intent(ctx, cls).apply {
-        action = AppWidgetManager.ACTION_APPWIDGET_UPDATE
-        putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, ids)
-      })
-    }
-    call.resolve()
-  }
-}
-```
-
-Regístralo en `MainActivity.java`: `registerPlugin(WidgetBridge.class);`
-
-En `app.js`, al final de `renderDashboard()`:
-
-```js
-if (window.Capacitor?.Plugins?.WidgetBridge) {
-  const hoy = tareasHoyPend().slice(0, 4).map(t => t.title)
-    .concat(findMyAssignments(currentHistorial, (nameInput.value||'').trim())
-      .filter(m => assignmentDateISO(m.fecha) === todayISO()).map(m => m.categoria));
-  const next = deriveMeetings().filter(m => m.iso >= todayISO())
-    .sort((a,b)=>a.iso.localeCompare(b.iso))[0];
-  window.Capacitor.Plugins.WidgetBridge.save({
-    hoy: JSON.stringify(hoy),
-    reunion: next ? `${next.label} · ${next.iso}` : '',
-    horas: fmtDur(ministerioTotals().mes),
-  });
-}
-```
-
-### 4.2 Widget "Hoy"  (los otros dos son iguales cambiando el texto)
-
-`android/app/src/main/res/xml/hoy_widget_info.xml`:
-
-```xml
-<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
-  android:minWidth="180dp" android:minHeight="110dp"
-  android:updatePeriodMillis="1800000"
-  android:initialLayout="@layout/hoy_widget"
-  android:resizeMode="horizontal|vertical" android:widgetCategory="home_screen" />
-```
-
-`res/layout/hoy_widget.xml`: un `LinearLayout` con un `TextView` de título ("Hoy") y otro
-`@+id/hoy_body`.
-
-`HoyWidget.kt`:
-
-```kotlin
-package org.hourglass.panel
-
-import android.app.PendingIntent
-import android.appwidget.*
-import android.content.*
-import android.widget.RemoteViews
-import org.json.JSONArray
-
-class HoyWidget : AppWidgetProvider() {
-  override fun onUpdate(ctx: Context, mgr: AppWidgetManager, ids: IntArray) {
-    val prefs = ctx.getSharedPreferences("hg_widgets", 0)
-    val arr = JSONArray(prefs.getString("hoy", "[]"))
-    val body = if (arr.length() == 0) "Nada para hoy"
-               else (0 until minOf(arr.length(), 4)).joinToString("\n") { "• " + arr.getString(it) }
-    val open = PendingIntent.getActivity(ctx, 0,
-      ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)!!
-        .apply { putExtra("go", "inicio") },
-      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-    for (id in ids) {
-      val v = RemoteViews(ctx.packageName, R.layout.hoy_widget)
-      v.setTextViewText(R.id.hoy_body, body)
-      v.setOnClickPendingIntent(R.id.hoy_body, open)
-      mgr.updateAppWidget(id, v)
-    }
-  }
-}
-```
-
-Declara los 3 en `AndroidManifest.xml` dentro de `<application>`:
-
-```xml
-<receiver android:name=".HoyWidget" android:exported="false">
-  <intent-filter><action android:name="android.appwidget.action.APPWIDGET_UPDATE"/></intent-filter>
-  <meta-data android:name="android.appwidget.provider" android:resource="@xml/hoy_widget_info"/>
-</receiver>
-```
-
-`ReunionWidget` lee `prefs.getString("reunion")`, `HorasWidget` lee `"horas"`. Mismo esqueleto.
-
-Para abrir en la pestaña correcta al pulsar: en `MainActivity` lee `intent.getStringExtra("go")`
-y navega a `index.html?go=<valor>` (o usa `Bridge.getWebView().evaluateJavascript("activateTab('...')", null)`).
+`app.js` ya llama a `WidgetBridge.save(...)` al refrescar el panel y programa las
+notificaciones locales (`scheduleLocalNotifs`) cada vez que cambian eventos/tareas.
 
 ---
 
-## 5. Actualizar la app luego
-
-Cada vez que cambies `app.js` / `index.html` / `style.css`:
+## 4. Compilar y probar (debug)
 
 ```bash
-npx cap copy android
+npm run cap:sync
+npm run cap:open      # abre Android Studio
 ```
-y reconstruye la APK. (Nada de esto toca tu GitHub Pages, que sigue funcionando como web.)
+
+En Android Studio: conecta el móvil con **Depuración USB** y pulsa **Run ▶**.
+Añade los widgets manteniendo pulsada la pantalla de inicio → *Widgets* → *Agenda JW*.
+
+---
+
+## 5. APK firmada (para instalar sin cable)
+
+En Android Studio: **Build → Generate Signed Bundle / APK → APK** → crea un keystore
+(guarda bien la contraseña) → variante **release**. Sale en
+`android/app/release/app-release.apk`.
+
+Cópiala al móvil y ábrela (permite *instalar apps de orígenes desconocidos* para tu
+gestor de archivos). **No hace falta Play Store.**
+
+> Recuerda añadir el **SHA-1 de release** al cliente OAuth de Android (paso 2.1) o el
+> login fallará solo en la APK firmada.
+
+---
+
+## 6. Cada vez que cambies la web
+
+```bash
+npm run cap:copy      # recopia www/ al proyecto Android
+```
+y reconstruye la APK. Nada de esto afecta a tu GitHub Pages.
