@@ -1,20 +1,24 @@
-# Hourglass Panel
+# Agenda JW
 
-Panel gratuito estilo Hourglass: cuadrante de asignaciones en PDF, calendario con recordatorios y proyectos de reunión — todo guardado en tu Google Drive (no hay servidor ni base de datos propia).
+Panel gratuito para la congregación: cuadrante de asignaciones en PDF, calendario con recordatorios, tareas, horas de ministerio, proyectos de reunión y un explorador de tus carpetas de Drive — todo guardado en tu Google Drive (no hay servidor ni base de datos propia).
+
+> Para instalarlo como app Android privada (APK) con widgets, mira [`MOBILE.md`](MOBILE.md).
 
 ## Cómo funciona el almacenamiento
 
-Al iniciar sesión con Google, la app crea (o reutiliza) una carpeta llamada **"Hourglass Panel"** en tu Google Drive y guarda ahí:
-- `cuadrante-actual.pdf` — el último PDF subido
-- `eventos.json` — los eventos del calendario
-- `proyectos.json` — los proyectos de reunión
+Al iniciar sesión con Google, la app crea (o reutiliza) una carpeta llamada **"Agenda JW"** en tu Google Drive (renombra automáticamente la antigua "Hourglass Panel" si existe) y guarda ahí todos sus datos:
+`cuadrante-<sello>.pdf` + `asignaciones-<sello>.json` (historial de cuadrantes), `cuadrantes.json`,
+`historial-asignaciones.json`, `asignaciones-ocultas.json`, `eventos.json`, `proyectos.json`,
+`ministerio.json`, `tareas.json`, `explorador-favoritos.json`.
 
-Se usa el scope `drive.file`, el más restringido posible: la app **solo** puede ver y modificar los archivos que ella misma crea, nunca el resto de tu Drive.
+Scopes usados:
+- `drive.file` — para leer y escribir **solo** los archivos que la propia app crea.
+- `drive.readonly` — solo para el **explorador de archivos** (pestaña «Archivos»), que lista y previsualiza tus carpetas y documentos en modo lectura.
 
 ## Puesta en marcha (una sola vez)
 
 1. **Google Cloud Console** → crea un proyecto → *APIs & Services* → *Library* → activa **Google Drive API**.
-2. *APIs & Services* → *OAuth consent screen* → tipo **External**, rellena lo básico y añade tu correo como *test user* (así no necesitas pasar la verificación de Google mientras lo uses tú/tu congregación en modo prueba).
+2. *APIs & Services* → *OAuth consent screen* → tipo **External**, rellena lo básico, en *Scopes* añade `.../auth/drive.file` y `.../auth/drive.readonly`, y añade tu correo como *test user* (así no necesitas pasar la verificación de Google mientras lo uses tú/tu congregación en modo prueba).
 3. *APIs & Services* → *Credentials* → **Create credentials → OAuth client ID** → tipo **Web application**.
    - En *Authorized JavaScript origins* añade la URL donde publiques la app, por ejemplo:
      `https://tu-usuario.github.io`
