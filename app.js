@@ -4,8 +4,10 @@
 const CONFIG = {
   // Sustituye por tu Client ID de Google Cloud Console (OAuth 2.0 → Web application)
   CLIENT_ID: '989709837307-449de0hk767r7lplvjfc4ilfb6smnpfd.apps.googleusercontent.com',
-  SCOPES: 'https://www.googleapis.com/auth/drive.file',
-  FOLDER_NAME: 'Hourglass Panel',
+  // drive.file: solo lo que crea la app · drive.readonly: leer tus carpetas en el explorador
+  SCOPES: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly',
+  FOLDER_NAME: 'Agenda JW',
+  FOLDER_NAME_LEGACY: 'Hourglass Panel',
   CUADRANTE_PREFIX: 'cuadrante-actual',   // solo para migrar cuadrantes antiguos
   ASIGNACIONES_NAME: 'asignaciones.json', // idem
   CUADRANTES_INDEX: 'cuadrantes.json',    // índice del historial de cuadrantes
@@ -15,6 +17,7 @@ const CONFIG = {
   PROYECTOS_NAME: 'proyectos.json',
   MINISTERIO_NAME: 'ministerio.json',
   TAREAS_NAME: 'tareas.json',
+  EXPLORADOR_NAME: 'explorador-favoritos.json',
 };
 
 /* =========================================================
@@ -25,8 +28,11 @@ let events = [];
 let proyectos = [];
 let ministerio = [];          // [{ id, date, minutes, note }]
 let tareas = [];              // [{ id, title, done, doneAt, due, time, priority, project, labels[], notes, subtasks[], createdAt }]
-let tareasView = 'hoy';       // hoy | proximo | todas | hechas
+let tareasView = 'todas';     // todas (agrupado por proyecto) | hoy | proximo | hechas
 let tareasFilter = { project: '', label: '' };
+let explorerFavs = [];        // [{ id, name }]
+let explorerStack = [];       // [{ id, name }] ruta actual
+let explorerLoaded = false;
 let hiddenKeys = new Set();   // claves de asignaciones ocultadas por el usuario
 let cuadrantesIdx = [];       // [{ id, uploaded, mime, ext, tipo, docName, parseName }] (recientes primero)
 let currentCuadranteId = null;
@@ -100,6 +106,7 @@ async function onSignedIn(){
     await loadEvents();     // antes de openCuadrante: su sync al calendario necesita los eventos ya cargados
     await loadMinisterio();
     await loadTareas();
+    await loadExplorerFavs();
     await loadCuadrantesIndex();
     await Promise.all([loadProyectos(), openCuadrante()]);
     renderNameMatches();
@@ -170,6 +177,7 @@ function activateTab(name){
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   $$('.panel').forEach(p => p.classList.toggle('active', p.id === `tab-${name}`));
   window.scrollTo({ top: 0, behavior: 'smooth' });
+  if (name === 'archivos' && !explorerLoaded && folderId) openExplorerFolder('root');
 }
 $$('.tab').forEach(tab => tab.addEventListener('click', () => activateTab(tab.dataset.tab)));
 document.getElementById('goProgramaBtn').addEventListener('click', () => activateTab('programa'));
@@ -251,10 +259,23 @@ async function downloadFile(fileId){
   return driveFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
 }
 
+async function renameFile(id, name){
+  await driveFetch(`https://www.googleapis.com/drive/v3/files/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+}
+
 async function ensureFolder(){
   const cached = localStorage.getItem('hg_folder_id');
   if (cached) { folderId = cached; return; }
   let f = await findFile(CONFIG.FOLDER_NAME, 'root', 'application/vnd.google-apps.folder');
+  if (!f) {
+    // migra la carpeta antigua "Hourglass Panel" → "Agenda JW" sin perder datos
+    const legacy = await findFile(CONFIG.FOLDER_NAME_LEGACY, 'root', 'application/vnd.google-apps.folder');
+    if (legacy) { try { await renameFile(legacy.id, CONFIG.FOLDER_NAME); } catch (e) { /* no crítico */ } f = legacy; }
+  }
   if (!f) f = await createFileMeta(CONFIG.FOLDER_NAME, 'root', 'application/vnd.google-apps.folder');
   folderId = f.id;
   localStorage.setItem('hg_folder_id', folderId);
@@ -1393,13 +1414,18 @@ function renderCalendar(){
     const cell = document.createElement('div');
     const dateStr = c.other ? null : `${y}-${String(m + 1).padStart(2, '0')}-${String(c.day).padStart(2, '0')}`;
     cell.className = 'cal-day' + (c.other ? ' other' : '') + (dateStr === todayStr ? ' today' : '');
-    const has = dateStr && eventsOn(dateStr).length > 0;
-    if (has) cell.classList.add('has-event');
-    cell.innerHTML = `<span class="num">${c.day}</span>${has ? '<span class="dot"></span>' : ''}`;
+    const nEv = dateStr ? eventsOn(dateStr).length : 0;
+    const nTk = dateStr ? tasksOn(dateStr).length : 0;
+    if (nEv || nTk) cell.classList.add('has-event');
+    const dots = (nEv ? '<span class="dot"></span>' : '') + (nTk ? '<span class="dot dot-task"></span>' : '');
+    cell.innerHTML = `<span class="num">${c.day}</span>${dots}`;
     if (dateStr) cell.addEventListener('click', () => openDayModal(dateStr));
     grid.appendChild(cell);
   });
 }
+
+/* Tareas pendientes con fecha en un día concreto (YYYY-MM-DD). */
+function tasksOn(iso){ return tareas.filter(t => !t.done && t.due === iso); }
 
 $('#prevMonth').addEventListener('click', () => { calMonth.setMonth(calMonth.getMonth() - 1); renderCalendar(); });
 $('#nextMonth').addEventListener('click', () => { calMonth.setMonth(calMonth.getMonth() + 1); renderCalendar(); });
@@ -1407,64 +1433,96 @@ $('#addEventBtn').addEventListener('click', () => openEventModal());
 
 function renderUpcoming(){
   const list = $('#upcomingList');
-  const now = new Date();
-  const upcoming = events
-    .filter(e => new Date(`${e.date}T${e.time || '00:00'}`) >= new Date(now.toDateString()))
-    .sort((a, b) => `${a.date}${a.time || ''}`.localeCompare(`${b.date}${b.time || ''}`))
-    .slice(0, 8);
+  const today = new Date().toISOString().slice(0, 10);
+
+  const items = events
+    .filter(e => e.date >= today)
+    .map(e => ({ t: 'ev', date: e.date, time: e.time || '', ev: e }))
+    .concat(tareas.filter(t => !t.done && t.due && t.due >= today)
+      .map(t => ({ t: 'tk', date: t.due, time: t.time || '', tk: t })))
+    .sort((a, b) => (a.date + (a.time || '99:99')).localeCompare(b.date + (b.time || '99:99')))
+    .slice(0, 10);
 
   list.innerHTML = '';
-  if (upcoming.length === 0) {
-    list.innerHTML = '<li class="empty-note" style="list-style:none;">Sin eventos próximos.</li>';
+  if (items.length === 0) {
+    list.innerHTML = '<li class="empty-note" style="list-style:none;">Nada próximo.</li>';
     renderDashboard();
     return;
   }
-  upcoming.forEach(ev => {
+  items.forEach(it => {
     const li = document.createElement('li');
-    if (ev.auto) li.className = 'ev-auto';
-    const d = new Date(`${ev.date}T${ev.time || '00:00'}`);
-    const dateLabel = d.toLocaleDateString('es-ES', { day: '2-digit', month: 'short' }) + (ev.time ? ` · ${ev.time}` : '');
-    li.innerHTML = `
-      <span class="ev-date">${dateLabel}</span>
-      <span class="ev-title">${ev.auto ? '📋 ' : ''}${escapeHtml(ev.title)}${ev.auto && ev.notes ? ` <em>· ${escapeHtml(ev.notes)}</em>` : ''}</span>
-      <span class="ev-actions">
-        <button class="icon-btn" title="Descargar .ics" data-ics="${ev.id}">⇩</button>
-        ${ev.auto ? '' : `<button class="icon-btn" title="Editar" data-edit="${ev.id}">✎</button>`}
-        <button class="icon-btn" title="${ev.auto ? 'Ocultar esta asignación' : 'Eliminar'}" data-del="${ev.id}">✕</button>
-      </span>`;
+    const dateLabel = new Date(`${it.date}T00:00`).toLocaleDateString('es-ES', { day: '2-digit', month: 'short' }) + (it.time ? ` · ${it.time}` : '');
+    if (it.t === 'ev') {
+      const ev = it.ev;
+      if (ev.auto) li.className = 'ev-auto';
+      li.innerHTML = `
+        <span class="ev-date">${dateLabel}</span>
+        <span class="ev-title">${ev.auto ? '📋 ' : ev.kind === 'reunion' ? '📅 ' : ''}${escapeHtml(ev.title)}${ev.auto && ev.notes ? ` <em>· ${escapeHtml(ev.notes)}</em>` : ''}</span>
+        <span class="ev-actions">
+          <button class="icon-btn" title="Descargar .ics" data-ics="${ev.id}">⇩</button>
+          ${ev.auto ? '' : `<button class="icon-btn" title="Editar" data-edit="${ev.id}">✎</button>`}
+          <button class="icon-btn" title="${ev.auto ? 'Ocultar esta asignación' : 'Eliminar'}" data-del="${ev.id}">✕</button>
+        </span>`;
+    } else {
+      const t = it.tk;
+      li.className = 'ev-task';
+      li.innerHTML = `
+        <span class="ev-date">${dateLabel}</span>
+        <span class="ev-title">🗒 ${escapeHtml(t.title)}${t.project ? ` <em>· ${escapeHtml(t.project)}</em>` : ''}</span>
+        <span class="ev-actions">
+          <button class="icon-btn" title="Marcar hecha" data-tdone="${escapeAttr(t.id)}">✓</button>
+          <button class="icon-btn" title="Editar" data-tedit="${escapeAttr(t.id)}">✎</button>
+        </span>`;
+    }
     list.appendChild(li);
   });
 
   list.querySelectorAll('[data-ics]').forEach(b => b.addEventListener('click', () => downloadIcs(b.dataset.ics)));
   list.querySelectorAll('[data-edit]').forEach(b => b.addEventListener('click', () => openEventModal(b.dataset.edit)));
   list.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', () => deleteEvent(b.dataset.del)));
+  list.querySelectorAll('[data-tdone]').forEach(b => b.addEventListener('click', () => toggleTarea(b.dataset.tdone)));
+  list.querySelectorAll('[data-tedit]').forEach(b => b.addEventListener('click', () => openTareaModal(b.dataset.tedit)));
   renderDashboard();
 }
 
 function openDayModal(dateStr){
   const dayEvents = eventsOn(dateStr);
+  const dayTasks = tareas.filter(t => t.due === dateStr);
   const niceDate = new Date(`${dateStr}T00:00`).toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' });
-  const rows = dayEvents.map(ev => `
+  const evRows = dayEvents.map(ev => `
     <div class="parte-row">
-      <span>${ev.time ? ev.time + ' · ' : ''}${ev.auto ? '📋 ' : ''}${escapeHtml(ev.title)}</span>
+      <span>${ev.time ? ev.time + ' · ' : ''}${ev.auto ? '📋 ' : ev.kind === 'reunion' ? '📅 ' : ''}${escapeHtml(ev.title)}</span>
       <span class="ev-actions">
         ${ev.auto ? '' : `<button class="icon-btn" data-edit="${ev.id}">✎</button>`}
         <button class="icon-btn" title="${ev.auto ? 'Ocultar asignación' : 'Eliminar'}" data-del="${ev.id}">✕</button>
       </span>
-    </div>`).join('') || '<p class="empty-note">Sin eventos este día.</p>';
+    </div>`).join('');
+  const tkRows = dayTasks.map(t => `
+    <div class="parte-row">
+      <span>${t.done ? '✔ ' : '🗒 '}${t.time ? escapeHtml(t.time) + ' · ' : ''}<span style="${t.done ? 'text-decoration:line-through;opacity:.6' : ''}">${escapeHtml(t.title)}</span></span>
+      <span class="ev-actions">
+        <button class="icon-btn" data-ttoggle="${escapeAttr(t.id)}" title="${t.done ? 'Desmarcar' : 'Marcar hecha'}">${t.done ? '↺' : '✓'}</button>
+        <button class="icon-btn" data-tedit="${escapeAttr(t.id)}">✎</button>
+      </span>
+    </div>`).join('');
+  const body = (evRows + tkRows) || '<p class="empty-note">Nada este día.</p>';
 
   renderModal(`
     <h3 style="text-transform:capitalize">${niceDate}</h3>
-    ${rows}
+    ${body}
     <div class="modal-actions">
       <button class="btn btn-ghost" id="modalClose">Cerrar</button>
-      <button class="btn btn-primary" id="modalAdd">+ Añadir evento</button>
+      <button class="btn btn-ghost" id="modalAddTask">+ Tarea</button>
+      <button class="btn btn-primary" id="modalAdd">+ Evento</button>
     </div>
   `);
   $('#modalClose').addEventListener('click', closeModal);
   $('#modalAdd').addEventListener('click', () => openEventModal(null, dateStr));
+  $('#modalAddTask').addEventListener('click', () => { closeModal(); openTareaModal(); setTimeout(() => { const el = document.getElementById('tDue'); if (el) el.value = dateStr; }, 60); });
   $$('#modalRoot [data-edit]').forEach(b => b.addEventListener('click', () => openEventModal(b.dataset.edit)));
   $$('#modalRoot [data-del]').forEach(b => b.addEventListener('click', () => { deleteEvent(b.dataset.del); openDayModal(dateStr); }));
+  $$('#modalRoot [data-tedit]').forEach(b => b.addEventListener('click', () => { closeModal(); openTareaModal(b.dataset.tedit); }));
+  $$('#modalRoot [data-ttoggle]').forEach(b => b.addEventListener('click', async () => { await toggleTarea(b.dataset.ttoggle); openDayModal(dateStr); }));
 }
 
 function openEventModal(id, presetDate){
@@ -1475,6 +1533,10 @@ function openEventModal(id, presetDate){
     <div class="field"><label>Fecha</label><input id="fDate" type="date" value="${existing ? existing.date : (presetDate || new Date().toISOString().slice(0,10))}"></div>
     <div class="field"><label>Hora (opcional)</label><input id="fTime" type="time" value="${existing ? existing.time || '' : ''}"></div>
     <div class="field"><label>Notas</label><textarea id="fNotes">${existing ? escapeHtml(existing.notes || '') : ''}</textarea></div>
+    <div class="field" style="flex-direction:row; align-items:center; gap:8px;">
+      <input type="checkbox" id="fReunion" ${existing && existing.kind === 'reunion' ? 'checked' : ''} style="width:auto;">
+      <label style="margin:0;">Es una reunión especial (aparece en Inicio)</label>
+    </div>
     <div class="field" style="flex-direction:row; align-items:center; gap:8px;">
       <input type="checkbox" id="fRemind" ${existing && existing.remind === false ? '' : 'checked'} style="width:auto;">
       <label style="margin:0;">Avisarme mientras tenga el panel abierto</label>
@@ -1497,6 +1559,7 @@ function openEventModal(id, presetDate){
       time: $('#fTime').value,
       notes: $('#fNotes').value.trim(),
       remind: $('#fRemind').checked,
+      kind: $('#fReunion').checked ? 'reunion' : 'evento',
     };
     if (existing) Object.assign(existing, data);
     else events.push(data);
@@ -1854,6 +1917,34 @@ function dueBadge(t){
   return `<span class="tk-due ${cls}">${escapeHtml(txt)}${t.time ? ' ' + escapeHtml(t.time) : ''}</span>`;
 }
 
+function tareaItemHtml(t){
+  const p = PRIO[t.priority] || PRIO[3];
+  const subs = t.subtasks || [];
+  const subDone = subs.filter(s => s.done).length;
+  return `<div class="tk-item${t.done ? ' done' : ''}">
+    <button class="tk-check" data-toggle="${escapeAttr(t.id)}" aria-label="Marcar hecha">${t.done ? '✔' : ''}</button>
+    <div class="tk-body">
+      <div class="tk-line1">
+        <span class="tk-prio ${p.cls}" title="Prioridad ${p.lbl}"></span>
+        <span class="tk-title">${escapeHtml(t.title)}</span>
+      </div>
+      <div class="tk-meta">
+        ${dueBadge(t)}
+        ${t.project ? `<span class="tk-tag">#${escapeHtml(t.project)}</span>` : ''}
+        ${(t.labels || []).map(l => `<span class="tk-tag tk-lab">@${escapeHtml(l)}</span>`).join('')}
+        ${subs.length ? `<span class="tk-sub-count">${subDone}/${subs.length}</span>` : ''}
+      </div>
+      ${subs.length ? `<div class="tk-subs">${subs.map(s => `
+        <label class="tk-subrow${s.done ? ' done' : ''}"><input type="checkbox" data-sub="${escapeAttr(t.id)}|${escapeAttr(s.id)}" ${s.done ? 'checked' : ''}><span>${escapeHtml(s.title)}</span></label>`).join('')}</div>` : ''}
+      ${t.notes ? `<div class="tk-notes">${escapeHtml(t.notes)}</div>` : ''}
+    </div>
+    <span class="ev-actions">
+      <button class="icon-btn" data-edit-t="${escapeAttr(t.id)}">✎</button>
+      <button class="icon-btn" data-del-t="${escapeAttr(t.id)}">✕</button>
+    </span>
+  </div>`;
+}
+
 function renderTareasFiltros(){
   const box = document.getElementById('tareasFiltros');
   if (!box) return;
@@ -1887,33 +1978,25 @@ function renderTareas(){
     renderDashboard();
     return;
   }
-  list.innerHTML = rows.map(t => {
-    const p = PRIO[t.priority] || PRIO[3];
-    const subs = t.subtasks || [];
-    const subDone = subs.filter(s => s.done).length;
-    return `<div class="tk-item${t.done ? ' done' : ''}">
-      <button class="tk-check" data-toggle="${escapeAttr(t.id)}" aria-label="Marcar hecha">${t.done ? '✔' : ''}</button>
-      <div class="tk-body">
-        <div class="tk-line1">
-          <span class="tk-prio ${p.cls}" title="Prioridad ${p.lbl}"></span>
-          <span class="tk-title">${escapeHtml(t.title)}</span>
-        </div>
-        <div class="tk-meta">
-          ${dueBadge(t)}
-          ${t.project ? `<span class="tk-tag">#${escapeHtml(t.project)}</span>` : ''}
-          ${(t.labels || []).map(l => `<span class="tk-tag tk-lab">@${escapeHtml(l)}</span>`).join('')}
-          ${subs.length ? `<span class="tk-sub-count">${subDone}/${subs.length}</span>` : ''}
-        </div>
-        ${subs.length ? `<div class="tk-subs">${subs.map(s => `
-          <label class="tk-subrow${s.done ? ' done' : ''}"><input type="checkbox" data-sub="${escapeAttr(t.id)}|${escapeAttr(s.id)}" ${s.done ? 'checked' : ''}><span>${escapeHtml(s.title)}</span></label>`).join('')}</div>` : ''}
-        ${t.notes ? `<div class="tk-notes">${escapeHtml(t.notes)}</div>` : ''}
-      </div>
-      <span class="ev-actions">
-        <button class="icon-btn" data-edit-t="${escapeAttr(t.id)}">✎</button>
-        <button class="icon-btn" data-del-t="${escapeAttr(t.id)}">✕</button>
-      </span>
-    </div>`;
-  }).join('');
+
+  if (tareasView === 'todas') {
+    // agrupado por proyecto / apartado; "Sin proyecto" al final
+    const groups = [];
+    rows.forEach(t => {
+      const key = (t.project || '').trim() || ' ';
+      let g = groups.find(x => x.key === key);
+      if (!g) { g = { key, name: key === ' ' ? 'Sin proyecto' : key, items: [] }; groups.push(g); }
+      g.items.push(t);
+    });
+    groups.sort((a, b) => (a.key === ' ' ? 1 : b.key === ' ' ? -1 : a.name.localeCompare(b.name)));
+    list.innerHTML = groups.map(g => `
+      <div class="tk-group">
+        <h4 class="tk-group-h">${escapeHtml(g.name)} <span>${g.items.length}</span></h4>
+        ${g.items.map(tareaItemHtml).join('')}
+      </div>`).join('');
+  } else {
+    list.innerHTML = rows.map(tareaItemHtml).join('');
+  }
 
   list.querySelectorAll('[data-toggle]').forEach(b => b.addEventListener('click', () => toggleTarea(b.dataset.toggle)));
   list.querySelectorAll('[data-sub]').forEach(c => c.addEventListener('change', () => toggleSubtarea(c.dataset.sub)));
@@ -1926,13 +2009,16 @@ document.querySelectorAll('#tareasNav .tk-vbtn').forEach(b =>
   b.addEventListener('click', () => { tareasView = b.dataset.view; renderTareas(); }));
 document.getElementById('addTareaBtn').addEventListener('click', () => openTareaModal());
 
+/* tras tocar tareas: refresca su vista y también el calendario/próximo (las que tienen fecha) */
+function refreshTareas(){ renderTareas(); renderCalendar(); renderUpcoming(); }
+
 async function toggleTarea(id){
   const t = tareas.find(x => x.id === id);
   if (!t) return;
   t.done = !t.done;
   t.doneAt = t.done ? new Date().toISOString() : null;
   showSand('Guardando…');
-  try { await persistTareas(); renderTareas(); } finally { hideSand(); }
+  try { await persistTareas(); refreshTareas(); } finally { hideSand(); }
 }
 async function toggleSubtarea(pair){
   const [tid, sid] = pair.split('|');
@@ -1946,7 +2032,7 @@ async function toggleSubtarea(pair){
 async function deleteTarea(id){
   tareas = tareas.filter(t => t.id !== id);
   showSand('Guardando…');
-  try { await persistTareas(); renderTareas(); } finally { hideSand(); }
+  try { await persistTareas(); refreshTareas(); } finally { hideSand(); }
 }
 
 function openTareaModal(id){
@@ -2027,7 +2113,7 @@ function openTareaModal(id){
     if (t) Object.assign(t, data); else tareas.push(data);
     closeModal();
     showSand('Guardando en Drive…');
-    try { await persistTareas(); renderTareas(); } finally { hideSand(); }
+    try { await persistTareas(); refreshTareas(); } finally { hideSand(); }
   });
 }
 
@@ -2036,31 +2122,17 @@ function openTareaModal(id){
    ========================================================= */
 function todayISO(){ return new Date().toISOString().slice(0, 10); }
 
-/* Reuniones deducidas de las fechas de los cuadrantes ya registrados. */
-function deriveMeetings(){
-  const seen = new Set(), out = [];
-  (currentHistorial || []).forEach(a => {
-    const iso = assignmentDateISO(a.fecha);
-    if (!iso) return;
-    const kind = a.tipo === 'publica' ? 'fs' : 'es';
-    if (seen.has(iso + kind)) return;
-    seen.add(iso + kind);
-    out.push({ iso, kind, label: kind === 'fs' ? 'Reunión pública' : 'Reunión de entre semana' });
-  });
-  return out;
-}
-
 function renderDashboard(){
   const box = document.getElementById('dashboard');
   if (!box) return;
   const today = todayISO();
   const name = (nameInput.value || '').trim();
+  const fD = (iso, opts) => escapeHtml(new Date(iso + 'T00:00').toLocaleDateString('es-ES', opts));
 
-  const meetings = deriveMeetings()
-    .concat(events.filter(e => !e.auto).map(e => ({ iso: e.date, kind: 'ev', label: e.title, time: e.time })))
-    .filter(m => m.iso && m.iso >= today)
-    .sort((a, b) => (a.iso + (a.time || '')).localeCompare(b.iso + (b.time || '')))
-    .slice(0, 6);
+  // Tareas pendientes: primero las que tienen fecha (hoy y futuras), luego sin fecha
+  const tPend = tareas.filter(t => !t.done && (!t.due || t.due >= today))
+    .sort((a, b) => (a.due ? a.due + (a.time || '99:99') : '9999').localeCompare(b.due ? b.due + (b.time || '99:99') : '9999'));
+  const tVencidas = tareas.filter(t => !t.done && t.due && t.due < today).length;
 
   const mine = findMyAssignments(currentHistorial, name)
     .map(m => ({ ...m, iso: assignmentDateISO(m.fecha) }))
@@ -2068,41 +2140,56 @@ function renderDashboard(){
     .sort((a, b) => a.iso.localeCompare(b.iso))
     .slice(0, 6);
 
+  const reuniones = events
+    .filter(e => !e.auto && e.kind === 'reunion' && e.date >= today)
+    .sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')))
+    .slice(0, 5);
+  const otrosEventos = events
+    .filter(e => !e.auto && e.kind !== 'reunion' && e.date >= today)
+    .sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')))
+    .slice(0, 5);
+
   const t = ministerioTotals();
   const proxProyecto = proyectos.slice()
     .filter(p => p.fecha && p.fecha >= today)
     .sort((a, b) => a.fecha.localeCompare(b.fecha))[0];
-  const tHoy = tareasHoyPend().slice(0, 6);
 
-  const fD = (iso, opts) => escapeHtml(new Date(iso + 'T00:00').toLocaleDateString('es-ES', opts));
-  const card = (title, body, tab) => `
-    <div class="dash-card"${tab ? ` data-goto="${tab}"` : ''}>
-      <h3>${title}</h3>${body}
-    </div>`;
+  const card = (title, body, tab) =>
+    `<div class="dash-card"${tab ? ` data-goto="${tab}"` : ''}><h3>${title}</h3>${body}</div>`;
+  const lines = (arr) => `<ul class="dash-lines">${arr.join('')}</ul>`;
 
   box.innerHTML =
-    card('Tareas de hoy',
-      tHoy.length
-        ? `<ul class="dash-lines">${tHoy.map(x => `<li>
-            <span class="dl-date">${x.due < today ? '⚠ ' : ''}${x.time ? escapeHtml(x.time) : 'hoy'}</span>
-            <span class="dl-main">${escapeHtml(x.title)}</span></li>`).join('')}</ul>`
-        : '<p class="empty-note">Sin tareas pendientes para hoy.</p>',
+    card('Tareas',
+      tPend.length
+        ? lines(tPend.slice(0, 6).map(x => `<li>
+            <span class="dl-date">${x.due ? (x.due === today ? 'Hoy' : fD(x.due, { day: '2-digit', month: 'short' })) + (x.time ? ' ' + escapeHtml(x.time) : '') : '—'}</span>
+            <span class="dl-main">${escapeHtml(x.title)}</span></li>`))
+          + (tVencidas ? `<p class="empty-note">⚠ ${tVencidas} vencida${tVencidas === 1 ? '' : 's'}</p>` : '')
+        : `<p class="empty-note">Sin tareas pendientes.${tVencidas ? ` ⚠ ${tVencidas} vencida${tVencidas === 1 ? '' : 's'}.` : ''}</p>`,
       'tareas') +
 
-    card('Mis próximas responsabilidades',
+    card('Mis próximas asignaciones',
       mine.length
-        ? `<ul class="dash-lines">${mine.map(m => `<li>
-            <span class="dl-date">${fD(m.iso, { day: '2-digit', month: 'short' })}${m.hora ? ' · ' + escapeHtml(m.hora) : ''}</span>
-            <span class="dl-main">${escapeHtml(m.categoria)}</span></li>`).join('')}</ul>`
-        : `<p class="empty-note">${name ? 'Sin asignaciones futuras registradas.' : 'Escribe tu nombre en la pestaña Cuadrante para verlas aquí.'}</p>`,
+        ? lines(mine.map(m => `<li>
+            <span class="dl-date">${fD(m.iso, { day: '2-digit', month: 'short' })}${m.hora ? ' ' + escapeHtml(m.hora) : ''}</span>
+            <span class="dl-main">${escapeHtml(m.categoria)}</span></li>`))
+        : `<p class="empty-note">${name ? 'Nada próximo registrado.' : 'Escribe tu nombre en la pestaña Cuadrante.'}</p>`,
       'cuadrante') +
 
-    card('Próximas reuniones',
-      meetings.length
-        ? `<ul class="dash-lines">${meetings.map(m => `<li>
-            <span class="dl-date">${fD(m.iso, { weekday: 'short', day: '2-digit', month: 'short' })}${m.time ? ' · ' + escapeHtml(m.time) : ''}</span>
-            <span class="dl-main">${escapeHtml(m.label)}</span></li>`).join('')}</ul>`
-        : '<p class="empty-note">Sube un cuadrante o añade eventos para ver aquí las reuniones.</p>',
+    card('Reuniones especiales',
+      reuniones.length
+        ? lines(reuniones.map(e => `<li>
+            <span class="dl-date">${fD(e.date, { weekday: 'short', day: '2-digit', month: 'short' })}${e.time ? ' ' + escapeHtml(e.time) : ''}</span>
+            <span class="dl-main">${escapeHtml(e.title)}</span></li>`))
+        : '<p class="empty-note">Crea una reunión especial en Calendario (marca la casilla).</p>',
+      'calendario') +
+
+    card('Próximos eventos',
+      otrosEventos.length
+        ? lines(otrosEventos.map(e => `<li>
+            <span class="dl-date">${fD(e.date, { day: '2-digit', month: 'short' })}${e.time ? ' ' + escapeHtml(e.time) : ''}</span>
+            <span class="dl-main">${escapeHtml(e.title)}</span></li>`))
+        : '<p class="empty-note">Sin eventos próximos.</p>',
       'calendario') +
 
     card('Ministerio este mes',
@@ -2115,14 +2202,147 @@ function renderDashboard(){
         ? `<p class="dash-big">${escapeHtml(proxProyecto.titulo)}</p>
            <p class="empty-note">${fD(proxProyecto.fecha, { day: 'numeric', month: 'long' })} · ${proyectos.length} en total</p>`
         : `<p class="empty-note">${proyectos.length ? proyectos.length + ' proyecto(s), ninguno con fecha futura.' : 'Sin proyectos.'}</p>`,
-      'proyectos') +
-
-    card('Guardado',
-      `<p class="empty-note">${cuadrantesIdx.length} cuadrante${cuadrantesIdx.length === 1 ? '' : 's'} guardado${cuadrantesIdx.length === 1 ? '' : 's'} ·
-        ${(currentHistorial || []).length} asignaciones registradas</p>`,
-      'programa');
+      'proyectos');
 
   box.querySelectorAll('[data-goto]').forEach(el => el.addEventListener('click', () => activateTab(el.dataset.goto)));
+}
+
+/* =========================================================
+   Explorador de Drive (solo lectura de tus carpetas)
+   ========================================================= */
+async function loadExplorerFavs(){
+  const f = await findFile(CONFIG.EXPLORADOR_NAME, folderId, 'application/json');
+  if (!f) { explorerFavs = []; return; }
+  try { explorerFavs = (await (await downloadFile(f.id)).json()) || []; }
+  catch (e) { explorerFavs = []; }
+}
+async function persistExplorerFavs(){
+  await saveFile(CONFIG.EXPLORADOR_NAME, 'application/json', JSON.stringify(explorerFavs, null, 2), folderId);
+}
+
+function reauthDrive(){
+  showError('Falta permiso para leer tus carpetas de Drive. Pulsa «Entrar con Google» otra vez y acepta.');
+  try { tokenClient.requestAccessToken({ prompt: 'consent' }); } catch (e) {}
+}
+
+function fileIcon(mime){
+  if (!mime) return '📄';
+  if (mime === 'application/vnd.google-apps.folder') return '📁';
+  if (mime.startsWith('image/')) return '🖼️';
+  if (mime === 'application/pdf') return '📕';
+  if (mime.includes('spreadsheet') || mime.includes('excel') || mime.includes('csv')) return '📊';
+  if (mime.includes('document') || mime.includes('word')) return '📝';
+  if (mime.includes('presentation') || mime.includes('powerpoint')) return '📽️';
+  if (mime.startsWith('video/')) return '🎬';
+  if (mime.startsWith('audio/')) return '🎵';
+  return '📄';
+}
+
+async function driveList(id){
+  const q = `'${id}' in parents and trashed=false`;
+  const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}`
+    + `&fields=${encodeURIComponent('files(id,name,mimeType,modifiedTime,size,webViewLink)')}`
+    + `&orderBy=folder,name&pageSize=300&spaces=drive`;
+  return (await (await driveFetch(url)).json()).files || [];
+}
+
+async function openExplorerFolder(id, name){
+  if (!folderId) return;
+  showSand('Abriendo carpeta…');
+  try {
+    let files;
+    try { files = await driveList(id); }
+    catch (err) {
+      if (/Drive API 40[13]/.test(err.message || '')) { reauthDrive(); return; }
+      throw err;
+    }
+    if (id === 'root') {
+      explorerStack = [{ id: 'root', name: 'Mi unidad' }];
+    } else {
+      const i = explorerStack.findIndex(s => s.id === id);
+      if (i >= 0) explorerStack = explorerStack.slice(0, i + 1);
+      else explorerStack.push({ id, name: name || 'Carpeta' });
+    }
+    explorerLoaded = true;
+    renderExplorer(files);
+  } catch (err) {
+    console.error(err);
+    showError('No se pudo abrir la carpeta de Drive.');
+  } finally { hideSand(); }
+}
+
+function renderExplorer(files){
+  const bar = document.getElementById('explorerBar');
+  const list = document.getElementById('explorerList');
+  const favBox = document.getElementById('explorerFavs');
+  if (!bar || !list) return;
+
+  if (explorerFavs.length) {
+    favBox.hidden = false;
+    favBox.innerHTML = '<span class="ex-lbl">Favoritos</span>' + explorerFavs.map(f =>
+      `<button class="ex-fav" data-fav="${escapeAttr(f.id)}" data-favname="${escapeAttr(f.name)}">📁 ${escapeHtml(f.name)}</button>`).join('');
+    favBox.querySelectorAll('.ex-fav').forEach(b =>
+      b.addEventListener('click', () => openExplorerFolder(b.dataset.fav, b.dataset.favname)));
+  } else { favBox.hidden = true; favBox.innerHTML = ''; }
+
+  bar.innerHTML = explorerStack.map((s, i) =>
+    `<button class="ex-crumb" data-crumb="${escapeAttr(s.id)}">${escapeHtml(s.name)}</button>${i < explorerStack.length - 1 ? '<span class="ex-sep">›</span>' : ''}`).join('');
+  bar.querySelectorAll('.ex-crumb').forEach(b => b.addEventListener('click', () => openExplorerFolder(b.dataset.crumb)));
+
+  const cur = explorerStack[explorerStack.length - 1];
+  const isFav = explorerFavs.some(f => f.id === cur.id);
+  const folders = files.filter(f => f.mimeType === 'application/vnd.google-apps.folder');
+  const docs = files.filter(f => f.mimeType !== 'application/vnd.google-apps.folder');
+
+  list.innerHTML =
+    (cur.id !== 'root'
+      ? `<button class="ex-star${isFav ? ' on' : ''}" id="exStar">${isFav ? '★ Quitar de favoritos' : '☆ Añadir a favoritos'}</button>` : '') +
+    (files.length === 0 ? '<p class="empty-note">Carpeta vacía.</p>' : '') +
+    folders.map(f => `<div class="ex-row" data-open="${escapeAttr(f.id)}" data-name="${escapeAttr(f.name)}">
+      <span class="ex-ic">📁</span><span class="ex-nm">${escapeHtml(f.name)}</span><span class="ex-go">›</span></div>`).join('') +
+    docs.map(f => `<div class="ex-row" data-file="${escapeAttr(f.id)}" data-mime="${escapeAttr(f.mimeType || '')}" data-link="${escapeAttr(f.webViewLink || '')}" data-name="${escapeAttr(f.name)}">
+      <span class="ex-ic">${fileIcon(f.mimeType)}</span>
+      <span class="ex-nm">${escapeHtml(f.name)}</span>
+      <span class="ex-meta">${f.modifiedTime ? new Date(f.modifiedTime).toLocaleDateString('es-ES', { day: '2-digit', month: 'short', year: '2-digit' }) : ''}</span>
+    </div>`).join('');
+
+  const star = document.getElementById('exStar');
+  if (star) star.addEventListener('click', async () => {
+    if (isFav) explorerFavs = explorerFavs.filter(f => f.id !== cur.id);
+    else explorerFavs.unshift({ id: cur.id, name: cur.name });
+    try { await persistExplorerFavs(); } catch (e) {}
+    renderExplorer(files);
+  });
+  list.querySelectorAll('[data-open]').forEach(el => el.addEventListener('click', () => openExplorerFolder(el.dataset.open, el.dataset.name)));
+  list.querySelectorAll('[data-file]').forEach(el => el.addEventListener('click', () => openDriveFile(el.dataset.file, el.dataset.mime, el.dataset.link, el.dataset.name)));
+}
+
+async function openDriveFile(id, mime, link, name){
+  const previewable = mime === 'application/pdf' || (mime || '').startsWith('image/');
+  if (!previewable) {
+    if (link) window.open(link, '_blank', 'noopener');
+    else showError('Este archivo se abre desde Google Drive.');
+    return;
+  }
+  showSand('Cargando vista previa…');
+  try {
+    const blob = await (await driveFetch(`https://www.googleapis.com/drive/v3/files/${id}?alt=media`)).blob();
+    const url = URL.createObjectURL(blob);
+    const inner = mime === 'application/pdf'
+      ? `<embed src="${url}" type="application/pdf" style="width:100%; height:70vh; border:none; border-radius:10px;">`
+      : `<img src="${url}" alt="${escapeAttr(name)}" style="width:100%; border-radius:10px; display:block;">`;
+    renderModal(`
+      <h3 style="font-size:.95rem; word-break:break-word;">${escapeHtml(name)}</h3>
+      ${inner}
+      <div class="modal-actions">
+        ${link ? `<a class="btn btn-ghost" href="${escapeAttr(link)}" target="_blank" rel="noopener">Abrir en Drive</a>` : ''}
+        <button class="btn btn-primary" id="modalClose">Cerrar</button>
+      </div>`);
+    $('#modalClose').addEventListener('click', () => { closeModal(); URL.revokeObjectURL(url); });
+  } catch (err) {
+    if (/Drive API 40[13]/.test(err.message || '')) reauthDrive();
+    else { console.error(err); showError('No se pudo abrir el archivo.'); }
+  } finally { hideSand(); }
 }
 
 /* =========================================================
