@@ -11,15 +11,16 @@ Al iniciar sesión con Google, la app crea (o reutiliza) una carpeta llamada **"
 `historial-asignaciones.json`, `asignaciones-ocultas.json`, `eventos.json`, `proyectos.json`,
 `ministerio.json`, `tareas.json`, `explorador-favoritos.json`.
 
-Scope usado: **`https://www.googleapis.com/auth/drive`** (lectura y escritura en Drive). Hace falta
-para poder **elegir en qué carpeta guardar cada cuadrante** (p. ej. `JW/Cuadrantes`) y para el
-explorador de archivos. Los datos internos de la app siguen en su carpeta **"Agenda JW"**; los
-documentos de cuadrante van a la carpeta que tú elijas (se recuerda como predeterminada).
+Scopes usados:
+- **`.../auth/drive`** — guardar cuadrantes en la carpeta que elijas (p. ej. `JW/Cuadrantes`) y el explorador de archivos.
+- **`.../auth/calendar`** — crear un calendario **«Agenda JW»** en tu cuenta y volcar ahí eventos, tareas y asignaciones con **recordatorios**, para que los avisos suenen aunque la app esté cerrada. Se activa con la casilla *«Sincronizar con Google Calendar»* en la pestaña Calendario.
+
+Los datos internos de la app siguen en su carpeta **"Agenda JW"** de Drive; los documentos de cuadrante van a la carpeta que tú elijas.
 
 ## Puesta en marcha (una sola vez)
 
-1. **Google Cloud Console** → crea un proyecto → *APIs & Services* → *Library* → activa **Google Drive API**.
-2. *APIs & Services* → *OAuth consent screen* → tipo **External**, rellena lo básico, en *Scopes* añade `.../auth/drive`, y añade tu correo como *test user* (así no necesitas pasar la verificación de Google mientras lo uses tú/tu congregación en modo prueba). El scope `drive` es "restringido": en modo prueba con test users funciona sin verificación.
+1. **Google Cloud Console** → crea un proyecto → *APIs & Services* → *Library* → activa **Google Drive API** y **Google Calendar API**.
+2. *APIs & Services* → *OAuth consent screen* → tipo **External**, rellena lo básico, en *Scopes* añade `.../auth/drive` y `.../auth/calendar`, y añade tu correo como *test user*. En modo prueba con test users funciona sin verificación de Google (aunque salga el aviso «app no verificada» → *Configuración avanzada → continuar*).
 3. *APIs & Services* → *Credentials* → **Create credentials → OAuth client ID** → tipo **Web application**.
    - En *Authorized JavaScript origins* añade la URL donde publiques la app, por ejemplo:
      `https://tu-usuario.github.io`
