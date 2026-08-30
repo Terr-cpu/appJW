@@ -3,8 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Hourglass · Panel</title>
+<title>Agenda JW</title>
 <meta name="theme-color" content="#1E2A38">
+<meta name="apple-mobile-web-app-title" content="Agenda JW">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="apple-touch-icon" href="icon-192.png">
 <link rel="manifest" href="manifest.json">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -24,8 +27,8 @@
   <div class="brand">
     <svg class="brand-mark" viewBox="0 0 40 64" aria-hidden="true"><path d="M4 2h32v10c0 8-14 12-14 20s14 12 14 20v10H4V52c0-8 14-12 14-20S4 20 4 12V2z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/></svg>
     <div>
-      <h1>Hourglass</h1>
-      <p class="brand-sub">Panel de la congregación</p>
+      <h1>Agenda JW</h1>
+      <p class="brand-sub">Cuadrante · calendario · ministerio</p>
     </div>
   </div>
   <div class="account" id="accountArea">
@@ -39,13 +42,14 @@
 </header>
 
 <nav class="tabs" id="tabs" hidden>
-  <button class="tab active" data-tab="inicio">Inicio</button>
-  <button class="tab" data-tab="cuadrante">Cuadrante</button>
-  <button class="tab" data-tab="programa">Programa</button>
-  <button class="tab" data-tab="tareas">Tareas</button>
-  <button class="tab" data-tab="calendario">Calendario</button>
-  <button class="tab" data-tab="ministerio">Ministerio</button>
-  <button class="tab" data-tab="proyectos">Proyectos</button>
+  <button class="tab active" data-tab="inicio"><span class="tab-i">🏠</span>Inicio</button>
+  <button class="tab" data-tab="tareas"><span class="tab-i">✅</span>Tareas</button>
+  <button class="tab" data-tab="calendario"><span class="tab-i">📅</span>Calendario</button>
+  <button class="tab" data-tab="cuadrante"><span class="tab-i">📄</span>Cuadrante</button>
+  <button class="tab" data-tab="programa"><span class="tab-i">📋</span>Programa</button>
+  <button class="tab" data-tab="ministerio"><span class="tab-i">⏱️</span>Ministerio</button>
+  <button class="tab" data-tab="proyectos"><span class="tab-i">🗂️</span>Proyectos</button>
+  <button class="tab" data-tab="archivos"><span class="tab-i">📁</span>Archivos</button>
 </nav>
 
 <main id="app" hidden>
@@ -114,9 +118,9 @@
       <button id="addTareaBtn" class="btn btn-primary">+ Nueva tarea</button>
     </div>
     <div id="tareasNav" class="tk-nav">
-      <button class="tk-vbtn active" data-view="hoy">Hoy</button>
+      <button class="tk-vbtn active" data-view="todas">Todas</button>
+      <button class="tk-vbtn" data-view="hoy">Hoy</button>
       <button class="tk-vbtn" data-view="proximo">Próximos 7 días</button>
-      <button class="tk-vbtn" data-view="todas">Todas</button>
       <button class="tk-vbtn" data-view="hechas">Hechas</button>
     </div>
     <div id="tareasFiltros" class="tk-filtros"></div>
@@ -138,6 +142,13 @@
       <button id="addProyectoBtn" class="btn btn-primary">+ Nuevo</button>
     </div>
     <div id="proyectosList" class="proyectos-list"></div>
+  </section>
+
+  <section id="tab-archivos" class="panel">
+    <div class="panel-head"><h2>Archivos de Drive</h2></div>
+    <div id="explorerFavs" class="ex-favs" hidden></div>
+    <div id="explorerBar" class="ex-bar"></div>
+    <div id="explorerList" class="ex-list"></div>
   </section>
 
 </main>
