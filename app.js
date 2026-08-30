@@ -4,8 +4,9 @@
 const CONFIG = {
   // Sustituye por tu Client ID de Google Cloud Console (OAuth 2.0 → Web application)
   CLIENT_ID: '989709837307-449de0hk767r7lplvjfc4ilfb6smnpfd.apps.googleusercontent.com',
-  // drive.file: solo lo que crea la app · drive.readonly: leer tus carpetas en el explorador
-  SCOPES: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.readonly',
+  // drive: leer y escribir en las carpetas que elijas (necesario para guardar cuadrantes
+  // en tu carpeta "JW" y para el explorador de archivos).
+  SCOPES: 'https://www.googleapis.com/auth/drive',
   FOLDER_NAME: 'Agenda JW',
   FOLDER_NAME_LEGACY: 'Hourglass Panel',
   CUADRANTE_PREFIX: 'cuadrante-actual',   // solo para migrar cuadrantes antiguos
@@ -18,6 +19,7 @@ const CONFIG = {
   MINISTERIO_NAME: 'ministerio.json',
   TAREAS_NAME: 'tareas.json',
   EXPLORADOR_NAME: 'explorador-favoritos.json',
+  CONFIG_NAME: 'config.json',
 };
 
 /* =========================================================
@@ -33,6 +35,7 @@ let tareasFilter = { project: '', label: '' };
 let explorerFavs = [];        // [{ id, name }]
 let explorerStack = [];       // [{ id, name }] ruta actual
 let explorerLoaded = false;
+let appConfig = {};           // { cuadranteDestId, cuadranteDestName }
 let hiddenKeys = new Set();   // claves de asignaciones ocultadas por el usuario
 let cuadrantesIdx = [];       // [{ id, uploaded, mime, ext, tipo, docName, parseName }] (recientes primero)
 let currentCuadranteId = null;
@@ -107,6 +110,7 @@ async function onSignedIn(){
     await loadMinisterio();
     await loadTareas();
     await loadExplorerFavs();
+    await loadConfig();
     await loadCuadrantesIndex();
     await Promise.all([loadProyectos(), openCuadrante()]);
     renderNameMatches();
@@ -301,12 +305,85 @@ function tipoLabel(t){
     : 'Documento';
 }
 
+/* ---------- Configuración de la app (carpeta destino, etc.) ---------- */
+async function loadConfig(){
+  const f = await findFile(CONFIG.CONFIG_NAME, folderId, 'application/json');
+  if (!f) { appConfig = {}; return; }
+  try { appConfig = (await (await downloadFile(f.id)).json()) || {}; }
+  catch (e) { appConfig = {}; }
+}
+async function persistConfig(){
+  await saveFile(CONFIG.CONFIG_NAME, 'application/json', JSON.stringify(appConfig, null, 2), folderId);
+}
+
+/* Selector de carpeta de Drive (solo carpetas). Devuelve {id,name} o null. */
+function pickFolder({ title = 'Elegir carpeta', startId = 'root', startName = 'Mi unidad' } = {}){
+  return new Promise((resolve) => {
+    let stack = [{ id: startId, name: startName }];
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; closeModal(); resolve(v); } };
+    async function show(){
+      const cur = stack[stack.length - 1];
+      showSand('Cargando carpetas…');
+      let folders = [];
+      try {
+        folders = (await driveList(cur.id)).filter(f => f.mimeType === 'application/vnd.google-apps.folder');
+      } catch (err) {
+        hideSand();
+        if (/Drive API 40[13]/.test(err.message || '')) { reauthDrive(); finish(null); return; }
+        showError('No se pudieron cargar las carpetas de Drive.'); finish(null); return;
+      }
+      hideSand();
+      renderModal(`
+        <h3>${escapeHtml(title)}</h3>
+        <div class="pk-bar">${stack.map((s, i) =>
+          `<button class="ex-crumb" data-c="${i}">${escapeHtml(s.name)}</button>${i < stack.length - 1 ? '<span class="ex-sep">›</span>' : ''}`).join('')}</div>
+        <div class="pk-list">${folders.length
+          ? folders.map(f => `<div class="ex-row" data-f="${escapeAttr(f.id)}" data-n="${escapeAttr(f.name)}">
+              <span class="ex-ic">📁</span><span class="ex-nm">${escapeHtml(f.name)}</span><span class="ex-go">›</span></div>`).join('')
+          : '<p class="empty-note">Esta carpeta no tiene subcarpetas.</p>'}</div>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" id="pkCancel">Cancelar</button>
+          <button class="btn btn-primary" id="pkChoose">Guardar aquí: «${escapeHtml(cur.name)}»</button>
+        </div>`);
+      $('#pkCancel').addEventListener('click', () => finish(null));
+      $('#pkChoose').addEventListener('click', () => finish({ id: cur.id, name: cur.name }));
+      $$('#modalRoot .pk-bar .ex-crumb').forEach(b => b.addEventListener('click', () => { stack = stack.slice(0, +b.dataset.c + 1); show(); }));
+      $$('#modalRoot .pk-list [data-f]').forEach(el => el.addEventListener('click', () => { stack.push({ id: el.dataset.f, name: el.dataset.n }); show(); }));
+    }
+    show();
+  });
+}
+
+/* Decide la carpeta destino del cuadrante: usa la guardada, o abre el selector
+   (empezando dentro de tu carpeta "JW" si existe) y la recuerda. */
+async function chooseCuadranteDest(){
+  if (appConfig.cuadranteDestId) {
+    return { id: appConfig.cuadranteDestId, name: appConfig.cuadranteDestName || 'carpeta guardada', remembered: true };
+  }
+  let start = { id: 'root', name: 'Mi unidad' };
+  try {
+    const jw = await findFile('JW', 'root', 'application/vnd.google-apps.folder');
+    if (jw) start = { id: jw.id, name: 'JW' };
+  } catch (e) { /* sin permiso aún */ }
+  const dest = await pickFolder({ title: 'Guardar el cuadrante en…', startId: start.id, startName: start.name });
+  if (dest) {
+    appConfig.cuadranteDestId = dest.id;
+    appConfig.cuadranteDestName = dest.name;
+    try { await persistConfig(); } catch (e) { /* no crítico */ }
+  }
+  return dest;
+}
+
 $('#pdfInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
   const isImage = file.type.startsWith('image/');
   const isPdf = file.type === 'application/pdf';
   if (!isImage && !isPdf) { showError('Sube un PDF o una imagen (JPG, PNG…).'); e.target.value = ''; return; }
+
+  const dest = await chooseCuadranteDest();
+  if (!dest) { e.target.value = ''; return; }
 
   showSand('Subiendo cuadrante…');
   try {
@@ -316,10 +393,10 @@ $('#pdfInput').addEventListener('change', async (e) => {
     const docName = `cuadrante-${stamp}.${ext}`;
     const parseName = `asignaciones-${stamp}.json`;
 
-    const meta = await createFileMeta(docName, folderId, mime);
+    // el documento va a la carpeta elegida; el análisis JSON, a la carpeta de la app
+    const meta = await createFileMeta(docName, dest.id, mime);
     await updateFileContent(meta.id, mime, file);
 
-    // muestra ya el original mientras se analiza
     if (currentDocUrl) URL.revokeObjectURL(currentDocUrl);
     currentDocBlob = file; currentDocMime = mime;
     currentDocUrl = URL.createObjectURL(file);
@@ -327,15 +404,19 @@ $('#pdfInput').addEventListener('change', async (e) => {
     $('#viewToggle').hidden = false;
 
     currentParsed = await parseBlob(file, mime);
-    await saveFile(parseName, 'application/json', JSON.stringify(currentParsed, null, 2), folderId);
+    const parseId = await saveFile(parseName, 'application/json', JSON.stringify(currentParsed, null, 2), folderId);
     await mergeIntoHistorial(currentParsed);
 
-    const entry = { id: stamp, uploaded: new Date().toISOString(), mime, ext, tipo: currentParsed.tipo, docName, parseName };
+    const entry = {
+      id: stamp, uploaded: new Date().toISOString(), mime, ext, tipo: currentParsed.tipo,
+      fileId: meta.id, fileName: docName, parentId: dest.id, parentName: dest.name,
+      parseId, parseName,
+    };
     cuadrantesIdx.unshift(entry);
     await persistCuadrantesIndex();
     currentCuadranteId = stamp;
 
-    $('#cuadranteMeta').textContent = `${tipoLabel(currentParsed.tipo)} · subido hoy`;
+    $('#cuadranteMeta').textContent = `${tipoLabel(currentParsed.tipo)} · guardado en «${dest.name}»`;
     { const gp = document.getElementById('goProgramaBtn'); if (gp) gp.hidden = false; }
     renderCuadranteHistory();
     renderDigitalView(currentParsed);
@@ -345,7 +426,7 @@ $('#pdfInput').addEventListener('change', async (e) => {
     renderDashboard();
   } catch (err) {
     console.error(err);
-    showError('No se pudo subir el archivo.');
+    showError('No se pudo subir el archivo. Comprueba que has dado permiso de Drive.');
   } finally {
     hideSand();
     e.target.value = '';
@@ -397,7 +478,8 @@ async function loadCuadrantesIndex(){
             mime: lf.mimeType || (/\.pdf$/i.test(lf.name) ? 'application/pdf' : 'image/*'),
             ext: (lf.name.split('.').pop() || 'pdf').toLowerCase(),
             tipo: '?',
-            docName: lf.name,
+            fileId: lf.id, fileName: lf.name, parentId: folderId, parentName: CONFIG.FOLDER_NAME,
+            parseId: (i === 0 && oldParse) ? oldParse.id : null,
             parseName: (i === 0 && oldParse) ? CONFIG.ASIGNACIONES_NAME : null,
           });
         });
@@ -405,6 +487,21 @@ async function loadCuadrantesIndex(){
     }
   }
   cuadrantesIdx.sort((a, b) => (b.uploaded || '').localeCompare(a.uploaded || ''));
+}
+
+/* Rellena fileId/parseId por nombre si un entrada antigua aún no los tiene. */
+async function ensureEntryIds(entry){
+  let changed = false;
+  if (!entry.fileId && (entry.fileName || entry.docName)) {
+    const f = await findFile(entry.fileName || entry.docName, entry.parentId || folderId).catch(() => null);
+    if (f) { entry.fileId = f.id; changed = true; }
+  }
+  if (!entry.parseId && entry.parseName) {
+    const f = await findFile(entry.parseName, folderId, 'application/json').catch(() => null);
+    if (f) { entry.parseId = f.id; changed = true; }
+  }
+  if (changed) { try { await persistCuadrantesIndex(); } catch (e) { /* no crítico */ } }
+  return entry;
 }
 
 /* Abre un cuadrante del historial (o el más reciente si no se indica id). */
@@ -427,10 +524,15 @@ async function openCuadrante(id){
     return;
   }
   currentCuadranteId = entry.id;
+  await ensureEntryIds(entry);
 
-  const docFile = await findFile(entry.docName, folderId);
-  if (!docFile) { showError('No se encontró el archivo de este cuadrante en Drive.'); return; }
-  const blob = await (await downloadFile(docFile.id)).blob();
+  if (!entry.fileId) { showError('No se encontró el archivo de este cuadrante en Drive (¿se movió o borró?).'); return; }
+  let blob;
+  try { blob = await (await downloadFile(entry.fileId)).blob(); }
+  catch (err) {
+    if (/Drive API 40[13]/.test(err.message || '')) { reauthDrive(); return; }
+    showError('No se pudo abrir el archivo de este cuadrante.'); return;
+  }
   if (currentDocUrl) URL.revokeObjectURL(currentDocUrl);
   currentDocBlob = blob;
   currentDocMime = entry.mime && entry.mime !== 'image/*' ? entry.mime : blob.type;
@@ -440,18 +542,19 @@ async function openCuadrante(id){
   if (gp) gp.hidden = false;
 
   const d = new Date(entry.uploaded);
-  meta.textContent = `${tipoLabel(entry.tipo)} · subido el ${d.toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' })}`;
+  meta.textContent = `${tipoLabel(entry.tipo)} · ${d.toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' })}`
+    + (entry.parentName ? ` · «${entry.parentName}»` : '');
 
   let parsed = null;
-  if (entry.parseName) {
-    const pf = await findFile(entry.parseName, folderId, 'application/json');
-    if (pf) { try { parsed = await (await downloadFile(pf.id)).json(); } catch (e) { parsed = null; } }
+  if (entry.parseId) {
+    try { parsed = await (await downloadFile(entry.parseId)).json(); } catch (e) { parsed = null; }
   }
   if (!parsed) {
     parsed = await parseBlob(blob, currentDocMime);
     const pn = entry.parseName || `asignaciones-${entry.id}.json`;
     entry.parseName = pn;
-    try { await saveFile(pn, 'application/json', JSON.stringify(parsed, null, 2), folderId); } catch (e) { /* no crítico */ }
+    try { entry.parseId = await saveFile(pn, 'application/json', JSON.stringify(parsed, null, 2), folderId); await persistCuadrantesIndex(); }
+    catch (e) { /* no crítico */ }
   }
   currentParsed = parsed;
 
@@ -475,7 +578,7 @@ async function deleteCuadrante(id){
   const d = new Date(entry.uploaded).toLocaleDateString('es-ES', { day: 'numeric', month: 'long', year: 'numeric' });
   renderModal(`
     <h3>Borrar cuadrante</h3>
-    <p>Se eliminará el documento de <strong>${escapeHtml(d)}</strong> (${escapeHtml(tipoLabel(entry.tipo))}).
+    <p>Se eliminará de Drive el documento de <strong>${escapeHtml(d)}</strong> (${escapeHtml(tipoLabel(entry.tipo))}${entry.parentName ? ' · «' + escapeHtml(entry.parentName) + '»' : ''}).
     Las asignaciones que ya se registraron se conservan en tu historial.</p>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="modalCancel">Cancelar</button>
@@ -486,10 +589,9 @@ async function deleteCuadrante(id){
     closeModal();
     showSand('Borrando…');
     try {
-      for (const nm of [entry.docName, entry.parseName]) {
-        if (!nm) continue;
-        const ff = await findFile(nm, folderId);
-        if (ff) { try { await deleteFile(ff.id); } catch (_) {} }
+      await ensureEntryIds(entry);
+      for (const fid of [entry.fileId, entry.parseId]) {
+        if (fid) { try { await deleteFile(fid); } catch (_) {} }
       }
       cuadrantesIdx = cuadrantesIdx.filter(c => c.id !== id);
       await persistCuadrantesIndex();
@@ -505,17 +607,29 @@ async function deleteCuadrante(id){
 function renderCuadranteHistory(){
   const box = document.getElementById('cuadranteHistory');
   if (!box) return;
-  if (!cuadrantesIdx.length) { box.hidden = true; box.innerHTML = ''; return; }
+  const destName = appConfig.cuadranteDestName;
+  const destLine = `<div class="ch-dest">Carpeta para nuevos cuadrantes:
+    <strong>${destName ? escapeHtml(destName) : 'se preguntará al subir'}</strong>
+    <button class="ch-chg" id="chChgDest">Cambiar</button></div>`;
+
+  if (!cuadrantesIdx.length) {
+    box.hidden = false;
+    box.innerHTML = destLine;
+    const b = document.getElementById('chChgDest');
+    if (b) b.addEventListener('click', changeCuadranteDest);
+    return;
+  }
   box.hidden = false;
   box.innerHTML = `<span class="ch-label">Cuadrantes guardados</span>
     <div class="ch-list">${cuadrantesIdx.map(c => {
       const d = new Date(c.uploaded).toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' });
       return `<div class="ch-item${c.id === currentCuadranteId ? ' active' : ''}" data-open="${escapeAttr(c.id)}">
         <span class="ch-date">${escapeHtml(d)}</span>
-        <span class="ch-tipo">${escapeHtml(tipoLabel(c.tipo))}</span>
+        <span class="ch-tipo">${escapeHtml(tipoLabel(c.tipo))}${c.parentName ? ' · ' + escapeHtml(c.parentName) : ''}</span>
         <button class="ch-del" title="Borrar" data-del="${escapeAttr(c.id)}">🗑</button>
       </div>`;
-    }).join('')}</div>`;
+    }).join('')}</div>
+    ${destLine}`;
   box.querySelectorAll('.ch-item').forEach(el => el.addEventListener('click', (e) => {
     if (e.target.closest('.ch-del')) return;
     openCuadrante(el.dataset.open);
@@ -524,6 +638,24 @@ function renderCuadranteHistory(){
     e.stopPropagation();
     deleteCuadrante(b.dataset.del);
   }));
+  const chg = document.getElementById('chChgDest');
+  if (chg) chg.addEventListener('click', changeCuadranteDest);
+}
+
+async function changeCuadranteDest(){
+  let start = { id: 'root', name: 'Mi unidad' };
+  try {
+    const jw = await findFile('JW', 'root', 'application/vnd.google-apps.folder');
+    if (jw) start = { id: jw.id, name: 'JW' };
+  } catch (e) { /* sin permiso */ }
+  const dest = await pickFolder({ title: 'Carpeta para nuevos cuadrantes', startId: start.id, startName: start.name });
+  if (!dest) return;
+  appConfig.cuadranteDestId = dest.id;
+  appConfig.cuadranteDestName = dest.name;
+  showSand('Guardando…');
+  try { await persistConfig(); } catch (e) { showError('No se pudo guardar la preferencia.'); }
+  finally { hideSand(); }
+  renderCuadranteHistory();
 }
 
 /* ---------- Historial de asignaciones (persiste aunque se reemplace el cuadrante) ---------- */
@@ -2295,8 +2427,11 @@ function renderExplorer(files){
   const docs = files.filter(f => f.mimeType !== 'application/vnd.google-apps.folder');
 
   list.innerHTML =
-    (cur.id !== 'root'
-      ? `<button class="ex-star${isFav ? ' on' : ''}" id="exStar">${isFav ? '★ Quitar de favoritos' : '☆ Añadir a favoritos'}</button>` : '') +
+    `<div class="ex-tools">
+      <label class="btn btn-ghost ex-up">⬆ Subir aquí<input type="file" id="exUpload" hidden></label>
+      ${cur.id !== 'root'
+        ? `<button class="ex-star${isFav ? ' on' : ''}" id="exStar">${isFav ? '★ Quitar de favoritos' : '☆ Añadir a favoritos'}</button>` : ''}
+    </div>` +
     (files.length === 0 ? '<p class="empty-note">Carpeta vacía.</p>' : '') +
     folders.map(f => `<div class="ex-row" data-open="${escapeAttr(f.id)}" data-name="${escapeAttr(f.name)}">
       <span class="ex-ic">📁</span><span class="ex-nm">${escapeHtml(f.name)}</span><span class="ex-go">›</span></div>`).join('') +
@@ -2312,6 +2447,21 @@ function renderExplorer(files){
     else explorerFavs.unshift({ id: cur.id, name: cur.name });
     try { await persistExplorerFavs(); } catch (e) {}
     renderExplorer(files);
+  });
+  const up = document.getElementById('exUpload');
+  if (up) up.addEventListener('change', async (e) => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    showSand(`Subiendo «${f.name}»…`);
+    try {
+      const m = await createFileMeta(f.name, cur.id, f.type || 'application/octet-stream');
+      await updateFileContent(m.id, f.type || 'application/octet-stream', f);
+      await openExplorerFolder(cur.id, cur.name);
+    } catch (err) {
+      if (/Drive API 40[13]/.test(err.message || '')) reauthDrive();
+      else { console.error(err); showError('No se pudo subir el archivo.'); }
+    } finally { hideSand(); }
   });
   list.querySelectorAll('[data-open]').forEach(el => el.addEventListener('click', () => openExplorerFolder(el.dataset.open, el.dataset.name)));
   list.querySelectorAll('[data-file]').forEach(el => el.addEventListener('click', () => openDriveFile(el.dataset.file, el.dataset.mime, el.dataset.link, el.dataset.name)));
