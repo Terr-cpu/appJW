@@ -14,6 +14,7 @@ const CONFIG = {
   CUADRANTES_INDEX: 'cuadrantes.json',    // índice del historial de cuadrantes
   HISTORIAL_NAME: 'historial-asignaciones.json',
   OCULTAS_NAME: 'asignaciones-ocultas.json',
+  GUARDADAS_NAME: 'asignaciones-guardadas.json',
   EVENTS_NAME: 'eventos.json',
   PROYECTOS_NAME: 'proyectos.json',
   MINISTERIO_NAME: 'ministerio.json',
@@ -36,7 +37,9 @@ let explorerFavs = [];        // [{ id, name }]
 let explorerStack = [];       // [{ id, name }] ruta actual
 let explorerLoaded = false;
 let appConfig = {};           // { cuadranteDestId, cuadranteDestName }
-let hiddenKeys = new Set();   // claves de asignaciones ocultadas por el usuario
+let hiddenKeys = new Set();   // claves de asignaciones descartadas por el usuario
+let savedList = [];           // [{ key, tipo, fecha, hora, categoria, nombreTexto }] guardadas a mano
+let searchName = '';          // búsqueda de asignación por nombre en el cuadrante actual
 let cuadrantesIdx = [];       // [{ id, uploaded, mime, ext, tipo, docName, parseName }] (recientes primero)
 let currentCuadranteId = null;
 let calMonth = new Date(calYearMonthStart());
@@ -106,6 +109,7 @@ async function onSignedIn(){
     await ensureFolder();
     await loadHistorial(); // primero, para que openCuadrante pueda fusionar sin condición de carrera
     await loadHidden();
+    await loadGuardadas();
     await loadEvents();     // antes de openCuadrante: su sync al calendario necesita los eventos ya cargados
     await loadMinisterio();
     await loadTareas();
@@ -181,10 +185,56 @@ function activateTab(name){
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   $$('.panel').forEach(p => p.classList.toggle('active', p.id === `tab-${name}`));
   window.scrollTo({ top: 0, behavior: 'smooth' });
+  closeDrawer();
   if (name === 'archivos' && !explorerLoaded && folderId) openExplorerFolder('root');
 }
 $$('.tab').forEach(tab => tab.addEventListener('click', () => activateTab(tab.dataset.tab)));
 document.getElementById('goProgramaBtn').addEventListener('click', () => activateTab('programa'));
+
+/* ---------- Menú hamburguesa (móvil) ---------- */
+function buildDrawer(){
+  const panel = document.getElementById('ndPanel');
+  if (!panel) return;
+  panel.innerHTML = $$('.tab').map(t =>
+    `<button class="nd-item" data-tab="${t.dataset.tab}">${t.innerHTML}</button>`).join('');
+  panel.querySelectorAll('.nd-item').forEach(b => b.addEventListener('click', () => activateTab(b.dataset.tab)));
+}
+function openDrawer(){
+  const d = document.getElementById('navDrawer');
+  if (d) { d.hidden = false; requestAnimationFrame(() => d.classList.add('open')); }
+}
+function closeDrawer(){
+  const d = document.getElementById('navDrawer');
+  if (d) { d.classList.remove('open'); setTimeout(() => { d.hidden = true; }, 220); }
+}
+buildDrawer();
+document.getElementById('hamburger').addEventListener('click', openDrawer);
+document.getElementById('navDrawer').addEventListener('click', (e) => { if (e.target.id === 'navDrawer') closeDrawer(); });
+
+/* ---------- Tema claro / oscuro ---------- */
+function applyTheme(mode){
+  const root = document.documentElement;
+  if (mode === 'light' || mode === 'dark') root.setAttribute('data-theme', mode);
+  else root.removeAttribute('data-theme');
+  const btn = document.getElementById('themeToggle');
+  const dark = mode === 'dark' || (!mode && matchMedia('(prefers-color-scheme: dark)').matches);
+  if (btn) btn.textContent = dark ? '☀️' : '🌙';
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', dark ? '#12161C' : '#1E2A38');
+}
+(function initTheme(){
+  applyTheme(localStorage.getItem('hg_theme') || '');
+  const btn = document.getElementById('themeToggle');
+  if (btn) btn.addEventListener('click', () => {
+    const cur = document.documentElement.getAttribute('data-theme');
+    const next = cur === 'dark' ? 'light' : 'dark';
+    localStorage.setItem('hg_theme', next);
+    applyTheme(next);
+  });
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (!localStorage.getItem('hg_theme')) applyTheme('');
+  });
+})();
 
 /* =========================================================
    Drive — utilidades genéricas
@@ -691,16 +741,70 @@ async function persistHidden(){
   await saveFile(CONFIG.OCULTAS_NAME, 'application/json', JSON.stringify([...hiddenKeys], null, 2), folderId);
 }
 
-async function hideAssignment(key){
-  if (!key || hiddenKeys.has(key)) return;
-  hiddenKeys.add(key);
-  showSand('Guardando…');
-  try { await persistHidden(); } catch (e) { showError('No se pudo guardar el cambio.'); }
-  finally { hideSand(); }
+/* ---------- Asignaciones GUARDADAS a mano (van al calendario, persisten) ---------- */
+async function loadGuardadas(){
+  const f = await findFile(CONFIG.GUARDADAS_NAME, folderId, 'application/json');
+  if (!f) { savedList = []; return; }
+  try { savedList = (await (await downloadFile(f.id)).json()) || []; }
+  catch (e) { savedList = []; }
+}
+async function persistGuardadas(){
+  await saveFile(CONFIG.GUARDADAS_NAME, 'application/json', JSON.stringify(savedList, null, 2), folderId);
+}
+function isSavedKey(k){ return !!k && savedList.some(s => s.key === k); }
+
+/* Registro clave → datos, rellenado al renderizar, para reconstruir la asignación
+   cuando se pulsa ✓ Guardar desde cualquier sitio. */
+const _amMap = new Map();
+function assignmentActions(m){
+  const k = m._key || m.key;
+  _amMap.set(k, { key: k, tipo: m.tipo || null, fecha: m.fecha || '', hora: m.hora || '', categoria: m.categoria || 'Asignación', nombreTexto: m.nombreTexto || '' });
+  const saved = isSavedKey(k);
+  return `<span class="dv-acts">
+    <button class="dv-save${saved ? ' on' : ''}" title="${saved ? 'Quitar de guardadas' : 'Guardar'}" data-k="${escapeAttr(k)}">✓</button>
+    <button class="dv-del" title="Descartar" data-k="${escapeAttr(k)}">✕</button>
+  </span>`;
+}
+function wireAssignmentActions(box){
+  box.querySelectorAll('.dv-save').forEach(b => b.addEventListener('click', (e) => { e.stopPropagation(); toggleGuardada(b.dataset.k); }));
+  box.querySelectorAll('.dv-del').forEach(b => b.addEventListener('click', (e) => { e.stopPropagation(); hideAssignment(b.dataset.k); }));
+}
+
+function refreshAssignmentsUI(){
   renderDigitalView(currentParsed);
   renderNameMatches();
+  renderSearchMatches();
   updateHiddenBar();
+}
+
+async function toggleGuardada(key){
+  if (!key) return;
+  const i = savedList.findIndex(s => s.key === key);
+  if (i >= 0) savedList.splice(i, 1);
+  else {
+    const m = _amMap.get(key) || { key };
+    savedList.push({ key, tipo: m.tipo || null, fecha: m.fecha || '', hora: m.hora || '', categoria: m.categoria || 'Asignación', nombreTexto: m.nombreTexto || '' });
+    hiddenKeys.delete(key); // guardar deshace descartar
+  }
+  showSand('Guardando…');
+  try { await persistGuardadas(); await persistHidden(); } catch (e) { showError('No se pudo guardar el cambio.'); }
+  finally { hideSand(); }
+  refreshAssignmentsUI();
   await syncMyAssignmentsToCalendar();
+  renderDashboard();
+}
+
+async function hideAssignment(key){
+  if (!key) return;
+  hiddenKeys.add(key);
+  const i = savedList.findIndex(s => s.key === key);
+  if (i >= 0) savedList.splice(i, 1); // descartar deshace guardar
+  showSand('Guardando…');
+  try { await persistHidden(); await persistGuardadas(); } catch (e) { showError('No se pudo guardar el cambio.'); }
+  finally { hideSand(); }
+  refreshAssignmentsUI();
+  await syncMyAssignmentsToCalendar();
+  renderDashboard();
 }
 async function resetHidden(){
   if (hiddenKeys.size === 0) return;
@@ -708,19 +812,22 @@ async function resetHidden(){
   showSand('Guardando…');
   try { await persistHidden(); } catch (e) { showError('No se pudo guardar el cambio.'); }
   finally { hideSand(); }
-  renderDigitalView(currentParsed);
-  renderNameMatches();
-  updateHiddenBar();
+  refreshAssignmentsUI();
   await syncMyAssignmentsToCalendar();
+  renderDashboard();
 }
 function updateHiddenBar(){
   const bar = document.getElementById('hiddenBar');
   if (!bar) return;
-  if (hiddenKeys.size === 0) { bar.hidden = true; bar.innerHTML = ''; return; }
+  const nH = hiddenKeys.size, nG = savedList.length;
+  if (!nH && !nG) { bar.hidden = true; bar.innerHTML = ''; return; }
   bar.hidden = false;
-  bar.innerHTML = `<span>${hiddenKeys.size} asignación${hiddenKeys.size === 1 ? '' : 'es'} oculta${hiddenKeys.size === 1 ? '' : 's'}.</span>
-    <button class="btn btn-ghost" id="resetHiddenBtn">Volver a mostrar todas</button>`;
-  bar.querySelector('#resetHiddenBtn').addEventListener('click', resetHidden);
+  const parts = [];
+  if (nG) parts.push(`<span>✓ ${nG} guardada${nG === 1 ? '' : 's'}</span>`);
+  if (nH) parts.push(`<span>✕ ${nH} descartada${nH === 1 ? '' : 's'} <button class="btn btn-ghost" id="resetHiddenBtn">mostrar todas</button></span>`);
+  bar.innerHTML = parts.join(' · ');
+  const rb = bar.querySelector('#resetHiddenBtn');
+  if (rb) rb.addEventListener('click', resetHidden);
 }
 
 async function mergeIntoHistorial(parsed){
@@ -1277,19 +1384,27 @@ function renderDigitalView(parsed){
   } else if (tipo === 'publica') {
     box.innerHTML = visibles.map(a => {
       const k = keyOf(a, tipo);
+      const resumen = [
+        a.discursante && 'Discurso: ' + a.discursante,
+        a.presidente && 'Presidente: ' + a.presidente,
+        a.lectorAtalaya && 'Lector: ' + a.lectorAtalaya,
+        a.oracionConclusion && 'Oración: ' + a.oracionConclusion,
+      ].filter(Boolean).join(' · ');
+      const acts = assignmentActions({ _key: k, tipo, fecha: a.fecha, hora: '', categoria: 'Reunión pública', nombreTexto: resumen });
       if (a.asamblea) {
-        return `<div class="digital-week"><h3>${escapeHtml(a.fecha)}${delBtn(k)}</h3>
+        return `<div class="digital-week"><h3>${escapeHtml(a.fecha)}${acts}</h3>
           <p class="empty-note">Asamblea — sin reunión pública.</p></div>`;
       }
+      const row = (lbl, val) => `<div class="digital-row${rowMatchesSearch(val) ? ' dv-hit' : ''}"><span class="dr-parte">${lbl}</span><span class="dr-nombre">${highlightName(val || '', searchName)}</span></div>`;
       return `
-        <div class="digital-week">
-          <h3>${escapeHtml(a.fecha)}${delBtn(k)}</h3>
-          <div class="digital-row"><span class="dr-parte">Discurso</span><span class="dr-nombre">${escapeHtml(a.discursante || '')}</span></div>
+        <div class="digital-week${rowMatchesSearch([a.discursante, a.presidente, a.lectorAtalaya, a.oracionConclusion]) ? ' dv-hit-week' : ''}">
+          <h3>${escapeHtml(a.fecha)}${acts}</h3>
+          ${row('Discurso', a.discursante)}
           ${a.tema ? `<div class="digital-row"><span class="dr-parte">Tema</span><span class="dr-nombre">${escapeHtml(a.tema)}</span></div>` : ''}
           ${a.congregacion ? `<div class="digital-row"><span class="dr-parte">Congregación</span><span class="dr-nombre">${escapeHtml(a.congregacion)}</span></div>` : ''}
-          <div class="digital-row"><span class="dr-parte">Presidente</span><span class="dr-nombre">${escapeHtml(a.presidente || '')}</span></div>
-          <div class="digital-row"><span class="dr-parte">Lector de La Atalaya</span><span class="dr-nombre">${escapeHtml(a.lectorAtalaya || '')}</span></div>
-          <div class="digital-row"><span class="dr-parte">Oración de conclusión</span><span class="dr-nombre">${escapeHtml(a.oracionConclusion || '')}</span></div>
+          ${row('Presidente', a.presidente)}
+          ${row('Lector de La Atalaya', a.lectorAtalaya)}
+          ${row('Oración de conclusión', a.oracionConclusion)}
         </div>`;
     }).join('');
   } else {
@@ -1297,10 +1412,7 @@ function renderDigitalView(parsed){
     return;
   }
 
-  box.querySelectorAll('.dv-del').forEach(b => b.addEventListener('click', (e) => {
-    e.stopPropagation();
-    hideAssignment(b.dataset.hk);
-  }));
+  wireAssignmentActions(box);
 }
 
 function delBtn(key){
@@ -1314,6 +1426,12 @@ const SECTION_STYLE = {
   'vivamos como cristianos': { color: '#B4432D', bg: '#FBEAE5' },
 };
 
+function rowMatchesSearch(names){
+  if (!searchName) return false;
+  const t = normalizeText(searchName);
+  return (Array.isArray(names) ? names : [names]).some(n => normalizeText(n || '').includes(t));
+}
+
 function renderMidweekRows(filas, tipo){
   let html = '';
   let lastSeccion; // undefined ≠ null: fuerza a pintar el primer grupo, incluso si es "sin sección"
@@ -1325,12 +1443,15 @@ function renderMidweekRows(filas, tipo){
         html += `<div class="dv-section" style="color:${style.color}; background:${style.bg}; border-color:${style.color}">${escapeHtml(f.seccion)}</div>`;
       }
     }
+    const cat = categorizeMidweekRow(f);
+    const nombresTxt = (f.nombres || []).join(' / ');
+    const hit = rowMatchesSearch(f.nombres || []);
     html += `
-      <div class="digital-row">
+      <div class="digital-row${hit ? ' dv-hit' : ''}">
         <span class="dr-hora">${f.hora ? escapeHtml(f.hora) : ''}</span>
-        <span class="dr-parte"><span class="dr-cat">${escapeHtml(categorizeMidweekRow(f))}</span>${escapeHtml(f.parte || '')}</span>
-        <span class="dr-nombre">${f.rol ? `<em>${escapeHtml(f.rol)}</em>` : ''}${escapeHtml((f.nombres || []).join(' / '))}</span>
-        ${delBtn(keyOf(f, tipo))}
+        <span class="dr-parte"><span class="dr-cat">${escapeHtml(cat)}</span>${escapeHtml(f.parte || '')}</span>
+        <span class="dr-nombre">${f.rol ? `<em>${escapeHtml(f.rol)}</em>` : ''}${highlightName(nombresTxt, searchName)}</span>
+        ${assignmentActions({ _key: keyOf(f, tipo), tipo, fecha: f.fecha, hora: f.hora, categoria: cat, nombreTexto: nombresTxt })}
       </div>`;
   });
   return html;
@@ -1377,6 +1498,15 @@ nameInput.addEventListener('change', async () => {
   renderDashboard();
 });
 
+/* Buscar asignación por nombre en el cuadrante actual (búsqueda en vivo) */
+{
+  const si = document.getElementById('searchNameInput');
+  if (si) {
+    let _t;
+    si.addEventListener('input', () => { clearTimeout(_t); _t = setTimeout(renderSearchMatches, 220); });
+  }
+}
+
 function findMyAssignments(historial, name){
   if (!historial || !name) return [];
   const target = normalizeText(name);
@@ -1388,7 +1518,7 @@ function findMyAssignments(historial, name){
     if (a.tipo === 'entre-semana') {
       const nombres = a.nombres || [];
       if (nombres.some(n => normalizeText(n).includes(target))) {
-        out.push({ _key: k, fecha: a.fecha, hora: a.hora || '', categoria: categorizeMidweekRow(a), nombreTexto: nombres.join(' / ') });
+        out.push({ _key: k, tipo: 'entre-semana', fecha: a.fecha, hora: a.hora || '', categoria: categorizeMidweekRow(a), nombreTexto: nombres.join(' / ') });
       }
     } else if (a.tipo === 'publica') {
       if (a.asamblea) return;
@@ -1398,12 +1528,23 @@ function findMyAssignments(historial, name){
       ];
       campos.forEach(([key, label]) => {
         if (a[key] && normalizeText(a[key]).includes(target)) {
-          out.push({ _key: k, fecha: a.fecha, hora: '', categoria: label, nombreTexto: a[key] });
+          out.push({ _key: k, tipo: 'publica', fecha: a.fecha, hora: '', categoria: label, nombreTexto: a[key] });
         }
       });
     }
   });
   return out;
+}
+
+function nmCard(m, name){
+  return `<li class="${isSavedKey(m._key) ? 'nm-saved' : ''}${isHiddenKey(m._key) ? ' nm-hidden' : ''}">
+    <div class="nm-top">
+      <span class="nm-fecha">${escapeHtml(m.categoria)}</span>
+      <span class="nm-pagesmall">${escapeHtml(m.fecha)}${m.hora ? ' · ' + escapeHtml(m.hora) : ''}</span>
+    </div>
+    <div class="nm-detalle">${highlightName(m.nombreTexto, name)}</div>
+    ${assignmentActions({ ...m, tipo: m.tipo || (currentParsed && currentParsed.tipo) })}
+  </li>`;
 }
 
 function renderNameMatches(){
@@ -1419,20 +1560,58 @@ function renderNameMatches(){
     return;
   }
   box.innerHTML = `
-    <p class="nm-status">Esto es lo que tienes (se añade solo al calendario):</p>
-    <ul class="nm-cards">${matches.map(m => `
-      <li>
-        <div class="nm-top">
-          <span class="nm-fecha">${escapeHtml(m.categoria)}</span>
-          <span class="nm-pagesmall">${escapeHtml(m.fecha)}${m.hora ? ' · ' + escapeHtml(m.hora) : ''}</span>
-        </div>
-        <div class="nm-detalle">${highlightName(m.nombreTexto, name)}</div>
-        <button class="dv-del" title="Ocultar (también se quita del calendario)" data-hk="${escapeAttr(m._key)}">✕</button>
-      </li>`).join('')}</ul>`;
-  box.querySelectorAll('.dv-del').forEach(b => b.addEventListener('click', (e) => {
-    e.stopPropagation();
-    hideAssignment(b.dataset.hk);
-  }));
+    <p class="nm-status">Esto es lo que tienes (✓ y ✕ para guardar o descartar):</p>
+    <ul class="nm-cards">${matches.map(m => nmCard(m, name)).join('')}</ul>`;
+  wireAssignmentActions(box);
+}
+
+/* Búsqueda de asignaciones por nombre en el CUADRANTE ACTUAL. */
+function findAssignmentsInParsed(parsed, name){
+  if (!parsed || !parsed.asignaciones || !name) return [];
+  const target = normalizeText(name);
+  const tipo = parsed.tipo;
+  const out = [];
+  parsed.asignaciones.forEach(a => {
+    const k = keyOf(a, tipo);
+    if (tipo === 'entre-semana') {
+      const nombres = a.nombres || [];
+      if (nombres.some(n => normalizeText(n).includes(target))) {
+        out.push({ _key: k, tipo, fecha: a.fecha, hora: a.hora || '', categoria: categorizeMidweekRow(a), nombreTexto: nombres.join(' / ') });
+      }
+    } else if (tipo === 'publica' && !a.asamblea) {
+      [['discursante', 'Discurso público'], ['presidente', 'Presidencia'],
+       ['lectorAtalaya', 'Lectura de La Atalaya'], ['oracionConclusion', 'Oración de conclusión']]
+        .forEach(([f, label]) => {
+          if (a[f] && normalizeText(a[f]).includes(target)) {
+            out.push({ _key: k, tipo, fecha: a.fecha, hora: '', categoria: label, nombreTexto: a[f] });
+          }
+        });
+    }
+  });
+  return out;
+}
+
+function renderSearchMatches(){
+  const box = document.getElementById('searchMatches');
+  const inp = document.getElementById('searchNameInput');
+  if (!box || !inp) return;
+  const name = inp.value.trim();
+  const prev = searchName;
+  searchName = name;
+
+  if (!name) {
+    box.hidden = true; box.innerHTML = '';
+    if (prev) renderDigitalView(currentParsed); // quita resaltados
+    return;
+  }
+  box.hidden = false;
+  const matches = findAssignmentsInParsed(currentParsed, name);
+  box.innerHTML = matches.length
+    ? `<p class="nm-status">${matches.length} coincidencia${matches.length === 1 ? '' : 's'} para «${escapeHtml(name)}» en este cuadrante:</p>
+       <ul class="nm-cards">${matches.map(m => nmCard(m, name)).join('')}</ul>`
+    : `<p class="nm-status">Sin coincidencias para «${escapeHtml(name)}» en el cuadrante actual.</p>`;
+  wireAssignmentActions(box);
+  renderDigitalView(currentParsed); // resalta las filas en la vista digital
 }
 
 /* =========================================================
@@ -1489,22 +1668,19 @@ async function syncMyAssignmentsToCalendar(){
   const manuales = events.filter(e => !e.auto);
   const autos = [];
 
-  if (name) {
-    findMyAssignments(currentHistorial, name).forEach(m => {
-      const date = assignmentDateISO(m.fecha);
-      if (!date) return;
-      const id = 'auto_' + hashStr(`${m._key}|${m.categoria}|${date}`);
-      if (autos.some(e => e.id === id)) return;
-      const time = /^\d{1,2}:\d{2}$/.test(m.hora || '') ? m.hora.replace(/^(\d):/, '0$1:') : '';
-      autos.push({
-        id, auto: true, srcKey: m._key,
-        title: m.categoria,
-        date, time,
-        notes: m.nombreTexto || '',
-        remind: false,
-      });
-    });
-  }
+  const addAuto = (m) => {
+    const date = assignmentDateISO(m.fecha);
+    if (!date) return;
+    const id = 'auto_' + hashStr(`${m._key || m.key}|${m.categoria}|${date}`);
+    if (autos.some(e => e.id === id)) return;
+    const time = /^\d{1,2}:\d{2}$/.test(m.hora || '') ? m.hora.replace(/^(\d):/, '0$1:') : '';
+    autos.push({ id, auto: true, srcKey: m._key || m.key, title: m.categoria, date, time, notes: m.nombreTexto || '', remind: false });
+  };
+
+  // 1) asignaciones que coinciden con "Mi nombre"
+  if (name) findMyAssignments(currentHistorial, name).forEach(addAuto);
+  // 2) asignaciones guardadas a mano (✓), de cualquier nombre
+  savedList.forEach(s => { if (!hiddenKeys.has(s.key)) addAuto(s); });
 
   events = manuales.concat(autos);
   const nextAuto = JSON.stringify(autos.map(e => e.id).sort());
