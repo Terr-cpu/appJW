@@ -97,7 +97,7 @@ npm install @codetrix-studio/capacitor-google-auth
   "webDir": ".",
   "plugins": {
     "GoogleAuth": {
-      "scopes": ["https://www.googleapis.com/auth/drive.file"],
+      "scopes": ["https://www.googleapis.com/auth/drive"],
       "serverClientId": "989709837307-449de0hk767r7lplvjfc4ilfb6smnpfd.apps.googleusercontent.com",
       "forceCodeForRefreshToken": true
     }
