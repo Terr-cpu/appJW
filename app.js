@@ -4,9 +4,9 @@
 const CONFIG = {
   // Sustituye por tu Client ID de Google Cloud Console (OAuth 2.0 → Web application)
   CLIENT_ID: '989709837307-449de0hk767r7lplvjfc4ilfb6smnpfd.apps.googleusercontent.com',
-  // drive: leer y escribir en las carpetas que elijas (necesario para guardar cuadrantes
-  // en tu carpeta "JW" y para el explorador de archivos).
-  SCOPES: 'https://www.googleapis.com/auth/drive',
+  // drive: guardar cuadrantes en tus carpetas + explorador de archivos.
+  // calendar: crear el calendario "Agenda JW" y sincronizar eventos/avisos.
+  SCOPES: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/calendar',
   FOLDER_NAME: 'Agenda JW',
   FOLDER_NAME_LEGACY: 'Hourglass Panel',
   CUADRANTE_PREFIX: 'cuadrante-actual',   // solo para migrar cuadrantes antiguos
@@ -52,8 +52,12 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 /* =========================================================
    Google Identity Services — autenticación
+   (en web: token client de GIS · en la APK: plugin nativo GoogleAuth)
    ========================================================= */
+const IS_NATIVE = !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
+
 window.addEventListener('load', () => {
+  if (IS_NATIVE) { initAuthNative(); return; }
   const check = setInterval(() => {
     if (window.google && google.accounts) {
       clearInterval(check);
@@ -61,6 +65,26 @@ window.addEventListener('load', () => {
     }
   }, 100);
 });
+
+async function initAuthNative(){
+  const { GoogleAuth } = window.Capacitor.Plugins;
+  try { await GoogleAuth.initialize(); } catch (e) {}
+  const doLogin = async () => {
+    try {
+      const user = await GoogleAuth.signIn();
+      accessToken = user.authentication.accessToken;
+      localStorage.setItem('hg_token', accessToken);
+      localStorage.setItem('hg_token_ts', Date.now().toString());
+      await onSignedIn();
+    } catch (e) { console.error(e); showError('No se pudo iniciar sesión con Google.'); }
+  };
+  $('#signInBtn').addEventListener('click', doLogin);
+  $('#signOutBtn').addEventListener('click', async () => { try { await GoogleAuth.signOut(); } catch (e) {} signOut(); });
+  const cached = localStorage.getItem('hg_token');
+  const ts = parseInt(localStorage.getItem('hg_token_ts') || '0', 10);
+  if (cached && Date.now() - ts < 50 * 60 * 1000) { accessToken = cached; onSignedIn(); }
+  else doLogin();
+}
 
 function initAuth(){
   tokenClient = google.accounts.oauth2.initTokenClient({
@@ -122,6 +146,7 @@ async function onSignedIn(){
     renderCuadranteHistory();
     await syncMyAssignmentsToCalendar(); // vuelca mis asignaciones al calendario
     renderCalendar();
+    renderCalSettings();
     renderUpcoming();
     renderProyectos();
     renderMinisterio();
@@ -1859,6 +1884,159 @@ async function syncMyAssignmentsToCalendar(){
   }
   renderCalendar();
   renderUpcoming();
+  scheduleGCalSync();
+  scheduleLocalNotifs();
+}
+
+/* =========================================================
+   Sincronización con Google Calendar (calendario "Agenda JW")
+   Cada evento/tarea/asignación con fecha se refleja como evento de Google
+   con recordatorios (popup), así los avisos suenan aunque la app esté cerrada.
+   ========================================================= */
+function alertMins(){
+  const a = appConfig.alertMins;
+  return Array.isArray(a) && a.length ? a : [60, 10];
+}
+
+async function calFetch(url, opts = {}){
+  const res = await fetch(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: `Bearer ${accessToken}` } });
+  if (!res.ok) { const t = await res.text().catch(() => ''); throw new Error(`Calendar API ${res.status}: ${t}`); }
+  return res.status === 204 ? null : res.json();
+}
+
+async function ensureGCal(){
+  if (appConfig.gcalId) return appConfig.gcalId;
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Madrid';
+  const list = await calFetch('https://www.googleapis.com/calendar/v3/users/me/calendarList?minAccessRole=owner&maxResults=250');
+  const found = (list.items || []).find(c => c.summary === 'Agenda JW');
+  let id;
+  if (found) id = found.id;
+  else {
+    const created = await calFetch('https://www.googleapis.com/calendar/v3/calendars', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ summary: 'Agenda JW', description: 'Sincronizado desde la app Agenda JW', timeZone: tz }),
+    });
+    id = created.id;
+    try {
+      await calFetch('https://www.googleapis.com/calendar/v3/users/me/calendarList', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, colorId: '5' }),
+      });
+    } catch (e) { /* no crítico */ }
+  }
+  appConfig.gcalId = id;
+  try { await persistConfig(); } catch (e) {}
+  return id;
+}
+
+/* Lista de "eventos deseados" en la ventana de sincronización (hoy .. +120 días). */
+function gcalDesired(){
+  const today = todayISO();
+  const end = new Date(); end.setDate(end.getDate() + 120);
+  const endISO = end.toISOString().slice(0, 10);
+  const inWin = (d) => d && d >= today && d <= endISO;
+  const out = [];
+  events.forEach(e => {
+    if (!inWin(e.date)) return;
+    out.push({
+      hgKey: 'ev:' + e.id,
+      summary: (e.kind === 'reunion' ? '📅 ' : e.auto ? '📌 ' : '🗓 ') + e.title,
+      date: e.date, time: e.time || '', description: e.notes || '',
+    });
+  });
+  tareas.forEach(t => {
+    if (t.done || !inWin(t.due)) return;
+    out.push({
+      hgKey: 'tk:' + t.id,
+      summary: '✅ ' + t.title,
+      date: t.due, time: t.time || '',
+      description: (t.project ? `Proyecto: ${t.project}\n` : '') + (t.notes || ''),
+    });
+  });
+  return out;
+}
+
+function gcalBody(it, tz){
+  const body = {
+    summary: it.summary,
+    description: it.description || '',
+    extendedProperties: { private: { hgKey: it.hgKey, hgManaged: '1' } },
+    reminders: { useDefault: false, overrides: alertMins().map(m => ({ method: 'popup', minutes: m })) },
+  };
+  if (/^\d{2}:\d{2}$/.test(it.time || '')) {
+    const [h, mn] = it.time.split(':').map(Number);
+    const e = h * 60 + mn + 60;
+    body.start = { dateTime: `${it.date}T${it.time}:00`, timeZone: tz };
+    body.end = { dateTime: `${it.date}T${String(Math.floor(e / 60) % 24).padStart(2, '0')}:${String(e % 60).padStart(2, '0')}:00`, timeZone: tz };
+  } else {
+    body.start = { date: it.date };
+    const d = new Date(it.date + 'T12:00:00'); d.setDate(d.getDate() + 1); // T12 evita el salto de zona horaria
+    body.end = { date: d.toISOString().slice(0, 10) };
+  }
+  return body;
+}
+
+let gcalBusy = false, gcalTimer = null;
+function scheduleGCalSync(){
+  if (!appConfig.gcalOn) return;
+  clearTimeout(gcalTimer);
+  gcalTimer = setTimeout(() => { syncToGoogleCalendar(); }, 1800);
+}
+
+async function syncToGoogleCalendar(silent = true){
+  if (!appConfig.gcalOn || !accessToken || gcalBusy) return;
+  gcalBusy = true;
+  if (!silent) showSand('Sincronizando con Google Calendar…');
+  try {
+    const calId = await ensureGCal();
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Madrid';
+    const timeMin = new Date(); timeMin.setHours(0, 0, 0, 0);
+    const timeMax = new Date(); timeMax.setDate(timeMax.getDate() + 121);
+
+    let existing = [], pageToken;
+    do {
+      const u = new URL(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events`);
+      u.searchParams.set('timeMin', timeMin.toISOString());
+      u.searchParams.set('timeMax', timeMax.toISOString());
+      u.searchParams.set('showDeleted', 'false');
+      u.searchParams.set('singleEvents', 'true');
+      u.searchParams.set('maxResults', '250');
+      if (pageToken) u.searchParams.set('pageToken', pageToken);
+      const page = await calFetch(u.toString());
+      existing = existing.concat(page.items || []);
+      pageToken = page.nextPageToken;
+    } while (pageToken);
+
+    const byKey = new Map();
+    existing.forEach(ev => { const k = ev.extendedProperties && ev.extendedProperties.private && ev.extendedProperties.private.hgKey; if (k) byKey.set(k, ev); });
+
+    const desired = gcalDesired();
+    const desiredKeys = new Set(desired.map(d => d.hgKey));
+    const base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calId)}/events`;
+
+    for (const it of desired) {
+      const body = gcalBody(it, tz);
+      const ex = byKey.get(it.hgKey);
+      if (!ex) {
+        await calFetch(base, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      } else {
+        const exStart = (ex.start && (ex.start.dateTime || ex.start.date)) || '';
+        const wantStart = body.start.dateTime || body.start.date;
+        if (ex.summary !== body.summary || !exStart.startsWith(wantStart.slice(0, 16)) || (ex.description || '') !== body.description) {
+          await calFetch(`${base}/${ex.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        }
+      }
+    }
+    for (const ev of existing) {
+      const k = ev.extendedProperties && ev.extendedProperties.private && ev.extendedProperties.private.hgKey;
+      if (k && !desiredKeys.has(k)) { try { await calFetch(`${base}/${ev.id}`, { method: 'DELETE' }); } catch (e) {} }
+    }
+    if (!silent) showError('Google Calendar actualizado ✓');
+  } catch (err) {
+    console.error(err);
+    if (/Calendar API 40[13]/.test(err.message || '')) reauthDrive();
+    else if (!silent) showError('No se pudo sincronizar con Google Calendar.');
+  } finally { gcalBusy = false; if (!silent) hideSand(); }
 }
 
 function renderCalendar(){
@@ -1901,6 +2079,56 @@ function renderCalendar(){
 
 /* Tareas pendientes con fecha en un día concreto (YYYY-MM-DD). */
 function tasksOn(iso){ return tareas.filter(t => !t.done && t.due === iso); }
+
+/* ---------- Ajustes de calendario / avisos ---------- */
+const ALERT_PRESETS = [
+  { v: [15], t: '15 min antes' },
+  { v: [60, 10], t: '1 h y 10 min antes' },
+  { v: [1440, 60], t: '1 día y 1 h antes' },
+  { v: [2880, 1440, 120], t: '2 días, 1 día y 2 h antes' },
+];
+function renderCalSettings(){
+  const box = document.getElementById('calSettings');
+  if (!box) return;
+  const notifState = ('Notification' in window) ? Notification.permission : 'unsupported';
+  const cur = JSON.stringify(alertMins());
+  box.innerHTML = `
+    <label class="cs-row">
+      <input type="checkbox" id="csGcal" ${appConfig.gcalOn ? 'checked' : ''}>
+      <span>Sincronizar con Google Calendar${appConfig.gcalOn ? ' (calendario «Agenda JW»)' : ''}</span>
+    </label>
+    <div class="cs-row">
+      <span>Avisos:</span>
+      <select id="csLead">${ALERT_PRESETS.map(p => `<option value='${JSON.stringify(p.v)}' ${JSON.stringify(p.v) === cur ? 'selected' : ''}>${p.t}</option>`).join('')}</select>
+      ${appConfig.gcalOn ? '<button class="btn btn-ghost" id="csNow">Sincronizar ahora</button>' : ''}
+    </div>
+    ${notifState === 'granted'
+      ? '<p class="cs-hint">🔔 Alertas del navegador activadas (mientras la app esté abierta).</p>'
+      : notifState === 'denied'
+        ? '<p class="cs-hint">🔕 Alertas del navegador bloqueadas en los ajustes del navegador.</p>'
+        : notifState === 'unsupported' ? ''
+          : '<button class="btn btn-ghost" id="csNotif">🔔 Activar alertas del navegador</button>'}
+    <p class="cs-hint">Con Google Calendar los avisos suenan también con la app cerrada, en todos tus dispositivos.</p>`;
+
+  const gc = box.querySelector('#csGcal');
+  gc && gc.addEventListener('change', async () => {
+    appConfig.gcalOn = gc.checked;
+    try { await persistConfig(); } catch (e) {}
+    renderCalSettings();
+    if (appConfig.gcalOn) syncToGoogleCalendar(false);
+  });
+  const lead = box.querySelector('#csLead');
+  lead && lead.addEventListener('change', async () => {
+    try { appConfig.alertMins = JSON.parse(lead.value); } catch (e) { appConfig.alertMins = [60, 10]; }
+    try { await persistConfig(); } catch (e) {}
+    notifiedIds.clear(); localStorage.setItem('hg_notified', '[]');
+    scheduleGCalSync(); scheduleLocalNotifs();
+  });
+  const now = box.querySelector('#csNow');
+  now && now.addEventListener('click', () => syncToGoogleCalendar(false));
+  const nb = box.querySelector('#csNotif');
+  nb && nb.addEventListener('click', askNotifPermission);
+}
 
 $('#prevMonth').addEventListener('click', () => { calMonth.setMonth(calMonth.getMonth() - 1); renderCalendar(); });
 $('#nextMonth').addEventListener('click', () => { calMonth.setMonth(calMonth.getMonth() + 1); renderCalendar(); });
@@ -2040,7 +2268,7 @@ function openEventModal(id, presetDate){
     else events.push(data);
     closeModal();
     showSand('Guardando en Drive…');
-    try { await persistEvents(); renderCalendar(); renderUpcoming(); }
+    try { await persistEvents(); renderCalendar(); renderUpcoming(); scheduleGCalSync(); scheduleLocalNotifs(); }
     finally { hideSand(); }
   });
 }
@@ -2074,27 +2302,76 @@ function downloadIcs(id){
   a.click();
 }
 
+/* Todos los avisos con fecha+hora futura: eventos (salvo remind:false), tareas
+   pendientes y asignaciones aprobadas. */
+function upcomingAlerts(){
+  const out = [];
+  events.forEach(e => { if (e.remind !== false && e.date && /^\d{2}:\d{2}$/.test(e.time || '')) out.push({ id: 'ev:' + e.id, date: e.date, time: e.time, title: (e.kind === 'reunion' ? '📅 ' : '') + e.title }); });
+  tareas.forEach(t => { if (!t.done && t.due && /^\d{2}:\d{2}$/.test(t.time || '')) out.push({ id: 'tk:' + t.id, date: t.due, time: t.time, title: '✅ ' + t.title }); });
+  savedList.forEach(s => { const d = savedIsoOf(s); if (d && /^\d{1,2}:\d{2}$/.test(s.hora || '')) out.push({ id: 'as:' + s.key, date: d, time: s.hora.replace(/^(\d):/, '0$1:'), title: '📌 ' + s.categoria }); });
+  return out;
+}
+
 function checkReminders(){
-  if (!('Notification' in window)) return;
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
   const now = new Date();
-  events.forEach(ev => {
-    if (!ev.remind || !ev.time || notifiedIds.has(ev.id)) return;
-    const when = new Date(`${ev.date}T${ev.time}`);
-    const diffMin = (when - now) / 60000;
-    if (diffMin > 0 && diffMin <= 30) {
-      notifiedIds.add(ev.id);
-      localStorage.setItem('hg_notified', JSON.stringify([...notifiedIds]));
-      notify(ev.title, `Hoy a las ${ev.time}`);
+  const lead = Math.max(30, ...alertMins());
+  upcomingAlerts().forEach(a => {
+    if (notifiedIds.has(a.id)) return;
+    const diffMin = (new Date(`${a.date}T${a.time}`) - now) / 60000;
+    if (diffMin > 0 && diffMin <= lead) {
+      notifiedIds.add(a.id);
+      localStorage.setItem('hg_notified', JSON.stringify([...notifiedIds].slice(-300)));
+      notify(a.title, `A las ${a.time}${diffMin > 60 ? ' (en ' + Math.round(diffMin / 60) + ' h)' : ''}`);
     }
   });
 }
 
 function notify(title, body){
-  if (Notification.permission === 'granted') new Notification(title, { body, icon: undefined });
-  else if (Notification.permission !== 'denied') {
-    Notification.requestPermission().then(p => { if (p === 'granted') new Notification(title, { body }); });
-  }
+  try {
+    if (Notification.permission === 'granted') new Notification(title, { body, icon: 'icon-192.png', tag: title });
+  } catch (e) { /* algunos navegadores exigen SW para Notification */ }
 }
+
+async function askNotifPermission(){
+  if (!('Notification' in window)) { showError('Este navegador no admite notificaciones.'); return; }
+  const p = await Notification.requestPermission();
+  if (p === 'granted') { notify('Alertas activadas', 'Te avisaré de tus asignaciones y tareas.'); checkReminders(); }
+  renderCalSettings();
+}
+
+/* Notificaciones NATIVAS del móvil (Capacitor) — suenan con la app cerrada.
+   En web es un no-op; en la APK usa @capacitor/local-notifications. */
+async function scheduleLocalNotifs(){
+  const LN = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.LocalNotifications;
+  if (!LN) return;
+  try {
+    const perm = await LN.checkPermissions();
+    if (perm.display !== 'granted') { const r = await LN.requestPermissions(); if (r.display !== 'granted') return; }
+    const pend = await LN.getPending();
+    if (pend.notifications && pend.notifications.length) await LN.cancel({ notifications: pend.notifications.map(n => ({ id: n.id })) });
+    const now = Date.now();
+    const mins = alertMins();
+    const toSchedule = [];
+    upcomingAlerts().forEach(a => {
+      const at = new Date(`${a.date}T${a.time}`).getTime();
+      mins.forEach(lead => {
+        const when = at - lead * 60000;
+        if (when > now + 5000) {
+          toSchedule.push({
+            id: (hashInt(a.id + '|' + lead) % 2000000000),
+            title: a.title,
+            body: lead >= 60 ? `En ${Math.round(lead / 60)} h · ${a.time}` : `En ${lead} min · ${a.time}`,
+            schedule: { at: new Date(when) },
+            smallIcon: 'ic_stat_icon',
+          });
+        }
+      });
+    });
+    if (toSchedule.length) await LN.schedule({ notifications: toSchedule.slice(0, 480) });
+  } catch (e) { console.error('LocalNotifications', e); }
+}
+function hashInt(s){ let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); }
 
 /* =========================================================
    Proyectos de reunión
@@ -2728,6 +3005,30 @@ function renderDashboard(){
       'proyectos');
 
   box.querySelectorAll('[data-goto]').forEach(el => el.addEventListener('click', () => activateTab(el.dataset.goto)));
+  pushWidgetData();
+}
+
+/* Envía un resumen a los widgets nativos de Android (no-op en web). */
+function pushWidgetData(){
+  const WB = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.WidgetBridge;
+  if (!WB) return;
+  try {
+    const today = todayISO();
+    const name = (nameInput.value || '').trim();
+    const hoy = []
+      .concat(tareas.filter(t => !t.done && t.due === today).map(t => t.title))
+      .concat(findMyAssignments(currentHistorial, name).filter(m => assignmentDateISO(m.fecha) === today).map(m => m.categoria))
+      .concat(savedList.filter(s => savedIsoOf(s) === today).map(s => s.categoria))
+      .slice(0, 6);
+    const nextEv = events
+      .filter(e => e.date >= today && (e.kind === 'reunion'))
+      .sort((a, b) => a.date.localeCompare(b.date))[0];
+    WB.save({
+      hoy: JSON.stringify(hoy),
+      reunion: nextEv ? `${nextEv.title} · ${new Date(nextEv.date + 'T00:00').toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' })}` : '',
+      horas: fmtDur(ministerioTotals().mes),
+    }).catch(() => {});
+  } catch (e) { /* no crítico */ }
 }
 
 /* =========================================================
