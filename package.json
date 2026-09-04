@@ -1,0 +1,25 @@
+{
+  "name": "agenda-jw",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Agenda JW — app web (GitHub Pages) y APK Android privada (Capacitor).",
+  "type": "module",
+  "scripts": {
+    "postinstall": "patch-package",
+    "www": "node scripts/build-www.mjs",
+    "cap:add": "npm run www && cap add android",
+    "cap:sync": "npm run www && cap sync android",
+    "cap:copy": "npm run www && cap copy android",
+    "cap:open": "cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.1.0",
+    "@capacitor/core": "^6.1.0",
+    "@capacitor/local-notifications": "^6.1.0",
+    "@codetrix-studio/capacitor-google-auth": "^3.4.0-rc.4"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.1.0",
+    "patch-package": "^8.0.1"
+  }
+}
