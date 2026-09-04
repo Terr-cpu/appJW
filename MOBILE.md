@@ -63,45 +63,46 @@ npx capacitor-assets generate --android --iconBackgroundColor "#1C2A3A" --iconBa
 
 ---
 
-## 3. Widgets + alertas nativas (pegar 6 archivos)
+## 3. Widgets + alertas nativas (copiar la carpeta `mobile/`)
 
-Copia desde [`mobile/`](mobile/) a `android/app/src/main/`:
+Todo el código nativo está en **Java** (el proyecto no lleva plugin de Kotlin). Copia
+recursivamente el contenido de [`mobile/`](mobile/) a `android/app/src/main/`:
 
 | Origen | Destino |
 |---|---|
-| `mobile/java/WidgetBridge.kt` | `java/org/agendajw/app/WidgetBridge.kt` |
-| `mobile/java/Widgets.kt` | `java/org/agendajw/app/Widgets.kt` |
-| `mobile/res/layout/widget_common.xml` | `res/layout/widget_common.xml` |
-| `mobile/res/xml/hoy_widget_info.xml` | `res/xml/hoy_widget_info.xml` (y **cópialo** como `reunion_widget_info.xml` y `horas_widget_info.xml`) |
+| `mobile/java/*.java` | `java/org/agendajw/app/` (incluye `MainActivity.java`, que **sobrescribe** el generado) |
+| `mobile/res/layout/*.xml` | `res/layout/` |
+| `mobile/res/drawable/*.xml` | `res/drawable/` |
+| `mobile/res/xml/*_widget_info.xml` | `res/xml/` |
+
+En Windows, desde la raíz del repo:
+```bash
+xcopy /E /Y mobile\java  android\app\src\main\java\org\agendajw\app\
+xcopy /E /Y mobile\res   android\app\src\main\res\
+copy /Y   mobile\java\MainActivity.java  android\app\src\main\java\org\agendajw\app\MainActivity.java
+```
+
+Los 4 widgets:
+
+| Clase | Tamaño | Contenido |
+|---|---|---|
+| `ProximaWidget` | 2×2 | Mi próxima asignación (categoría + fecha + hora) |
+| `HoyWidget` | 4×2 | Eventos + tareas de hoy por hora; **casilla** que marca la tarea (se aplica al abrir la app) |
+| `SemanaWidget` | 4×2 | Mis partes del cuadrante de esta semana |
+| `MesWidget` | 4×4 | Rejilla del mes con punto azul (evento) / dorado (tarea); tocar un día lo abre |
 
 Luego:
 
-1. **Registrar el plugin.** En `java/org/agendajw/app/MainActivity.java`, dentro de `onCreate`
-   antes de `super.onCreate`, añade:
-   ```java
-   registerPlugin(WidgetBridge.class);
-   ```
-2. **Manifest.** Pega los 3 `<receiver>` de `mobile/AndroidManifest-snippet.xml` dentro de
-   `<application>` en `res/../AndroidManifest.xml`, y los 3 `<uses-permission>` (comentados en
-   ese archivo) arriba del todo.
-3. **Abrir en la pestaña correcta al pulsar un widget.** En `MainActivity.java`:
-   ```java
-   @Override
-   public void onNewIntent(android.content.Intent intent) {
-     super.onNewIntent(intent);
-     String go = intent.getStringExtra("go");
-     if (go != null && getBridge() != null) {
-       getBridge().getWebView().post(() ->
-         getBridge().getWebView().evaluateJavascript(
-           "window.activateTab && activateTab('" + go + "')", null));
-     }
-   }
-   ```
-4. Icono de estado para notificaciones: crea `res/drawable/ic_stat_icon.xml` (un icono
+1. **Manifest.** Pega los 4 `<receiver>` de `mobile/AndroidManifest-snippet.xml` dentro de
+   `<application>` en `AndroidManifest.xml`, y los 3 `<uses-permission>` (comentados en ese
+   archivo) fuera de `<application>`. `MainActivity.java` de `mobile/` ya hace
+   `registerPlugin(WidgetBridge.class)` y enruta `go`/`day` desde los widgets.
+2. Icono de estado para notificaciones: crea `res/drawable/ic_stat_icon.xml` (un icono
    blanco simple) o cambia `smallIcon` en `capacitor.config.json` por `ic_launcher`.
 
-`app.js` ya llama a `WidgetBridge.save(...)` al refrescar el panel y programa las
-notificaciones locales (`scheduleLocalNotifs`) cada vez que cambian eventos/tareas.
+`app.js` empuja los datos con `WidgetBridge.save({w_proxima, w_hoy, w_semana, w_mes})` cada
+vez que se refresca el panel, y al arrancar llama a `WidgetBridge.takePendingDone()` para
+aplicar las tareas marcadas desde el widget de *Hoy* y guardarlas en `tareas.json`.
 
 ---
 
