@@ -5,4 +5,5 @@ ios/
 .gradle/
 *.keystore
 !debug.keystore
+*.apk
 .DS_Store
