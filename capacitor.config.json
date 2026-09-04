@@ -13,6 +13,7 @@
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/calendar"
       ],
+      "clientId": "989709837307-449de0hk767r7lplvjfc4ilfb6smnpfd.apps.googleusercontent.com",
       "serverClientId": "989709837307-449de0hk767r7lplvjfc4ilfb6smnpfd.apps.googleusercontent.com",
       "forceCodeForRefreshToken": true
     }
