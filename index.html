@@ -24,7 +24,9 @@
 </div>
 
 <header class="topbar">
-  <button id="hamburger" class="hamburger" aria-label="Menú" hidden>☰</button>
+  <button id="hamburger" class="hamburger" aria-label="Menú" aria-expanded="false">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+  </button>
   <div class="brand">
     <svg class="brand-mark" viewBox="0 0 40 64" aria-hidden="true"><path d="M4 2h32v10c0 8-14 12-14 20s14 12 14 20v10H4V52c0-8 14-12 14-20S4 20 4 12V2z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/></svg>
     <div>
@@ -50,7 +52,6 @@
   <button class="tab" data-tab="calendario"><span class="tab-i">📅</span>Calendario</button>
   <button class="tab" data-tab="cuadrante"><span class="tab-i">📄</span>Cuadrante</button>
   <button class="tab" data-tab="ministerio"><span class="tab-i">⏱️</span>Ministerio</button>
-  <button class="tab" data-tab="proyectos"><span class="tab-i">🗂️</span>Proyectos</button>
   <button class="tab" data-tab="archivos"><span class="tab-i">📁</span>Archivos</button>
 </nav>
 
@@ -72,6 +73,16 @@
     </div>
     <p class="section-sub">Las asignaciones aprobadas (✓). Van al calendario. Puedes crear, editar o eliminar.</p>
     <div id="asignacionesList" class="asg-list"></div>
+
+    <div class="asg-search">
+      <h3>Buscar asignación por nombre</h3>
+      <div class="name-search">
+        <label for="searchNameInput">Nombre</label>
+        <input type="text" id="searchNameInput" placeholder="cualquier nombre">
+      </div>
+      <button class="btn btn-ghost sc-btn" id="scopePickerBtn">🔎 Buscar en: <span id="scopePickerLabel">Todos los cuadrantes</span></button>
+      <div id="searchMatches" class="name-matches" hidden></div>
+    </div>
   </section>
 
   <section id="tab-cuadrante" class="panel">
@@ -92,12 +103,6 @@
       <input type="text" id="myNameInput" placeholder="p. ej. Juan Martín">
     </div>
     <div id="nameMatches" class="name-matches"></div>
-
-    <div class="name-search">
-      <label for="searchNameInput">Buscar asignación por nombre</label>
-      <input type="text" id="searchNameInput" placeholder="cualquier nombre del cuadrante actual">
-    </div>
-    <div id="searchMatches" class="name-matches" hidden></div>
 
     <div id="hiddenBar" class="hidden-bar" hidden></div>
 
@@ -133,15 +138,18 @@
     <div class="panel-head">
       <h2>Tareas</h2>
       <button id="addTareaBtn" class="btn btn-primary">+ Nueva tarea</button>
+      <button id="addProyectoBtn" class="btn btn-primary" hidden>+ Nuevo proyecto</button>
     </div>
     <div id="tareasNav" class="tk-nav">
       <button class="tk-vbtn active" data-view="todas">Todas</button>
       <button class="tk-vbtn" data-view="hoy">Hoy</button>
       <button class="tk-vbtn" data-view="proximo">Próximos 7 días</button>
       <button class="tk-vbtn" data-view="hechas">Hechas</button>
+      <button class="tk-vbtn" data-view="proyectos">🗂️ Proyectos</button>
     </div>
     <div id="tareasFiltros" class="tk-filtros"></div>
     <div id="tareasList" class="tk-list"></div>
+    <div id="proyectosList" class="proyectos-list" hidden></div>
   </section>
 
   <section id="tab-ministerio" class="panel">
@@ -151,14 +159,6 @@
     </div>
     <div id="ministerioStats" class="min-stats"></div>
     <div id="ministerioList" class="min-list"></div>
-  </section>
-
-  <section id="tab-proyectos" class="panel">
-    <div class="panel-head">
-      <h2>Proyectos de reunión</h2>
-      <button id="addProyectoBtn" class="btn btn-primary">+ Nuevo</button>
-    </div>
-    <div id="proyectosList" class="proyectos-list"></div>
   </section>
 
   <section id="tab-archivos" class="panel">
