@@ -55,6 +55,7 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
    (en web: token client de GIS · en la APK: plugin nativo GoogleAuth)
    ========================================================= */
 const IS_NATIVE = !!(window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function' && window.Capacitor.isNativePlatform());
+if (IS_NATIVE) document.documentElement.classList.add('is-app');
 
 window.addEventListener('load', () => {
   if (IS_NATIVE) { initAuthNative(); return; }
@@ -66,24 +67,42 @@ window.addEventListener('load', () => {
   }, 100);
 });
 
+/* Sesión: guardamos el token ~50 min y, pasado ese tiempo, intentamos renovarlo
+   EN SILENCIO (sin volver a mostrar el selector de cuenta) antes de rendirnos y
+   pedir un login interactivo. `hg_ever_signed_in` recuerda que ya hubo consentimiento. */
+function applyToken(token){
+  accessToken = token;
+  localStorage.setItem('hg_token', token);
+  localStorage.setItem('hg_token_ts', Date.now().toString());
+  localStorage.setItem('hg_ever_signed_in', '1');
+}
+function tokenIsFresh(){
+  const ts = parseInt(localStorage.getItem('hg_token_ts') || '0', 10);
+  return Date.now() - ts < 50 * 60 * 1000;
+}
+
 async function initAuthNative(){
   const { GoogleAuth } = window.Capacitor.Plugins;
   try { await GoogleAuth.initialize(); } catch (e) {}
   const doLogin = async () => {
     try {
       const user = await GoogleAuth.signIn();
-      accessToken = user.authentication.accessToken;
-      localStorage.setItem('hg_token', accessToken);
-      localStorage.setItem('hg_token_ts', Date.now().toString());
+      applyToken(user.authentication.accessToken);
       await onSignedIn();
     } catch (e) { console.error(e); showError('No se pudo iniciar sesión con Google.'); }
   };
+  const trySilent = async () => {
+    try { const auth = await GoogleAuth.refresh(); applyToken(auth.accessToken); await onSignedIn(); return true; }
+    catch (e) { return false; }
+  };
   $('#signInBtn').addEventListener('click', doLogin);
   $('#signOutBtn').addEventListener('click', async () => { try { await GoogleAuth.signOut(); } catch (e) {} signOut(); });
+  window.__refreshTokenSilently = trySilent;
+
   const cached = localStorage.getItem('hg_token');
-  const ts = parseInt(localStorage.getItem('hg_token_ts') || '0', 10);
-  if (cached && Date.now() - ts < 50 * 60 * 1000) { accessToken = cached; onSignedIn(); }
-  else doLogin();
+  if (cached && tokenIsFresh()) { accessToken = cached; onSignedIn(); return; }
+  if (localStorage.getItem('hg_ever_signed_in') === '1' && await trySilent()) return;
+  doLogin();
 }
 
 function initAuth(){
@@ -92,30 +111,40 @@ function initAuth(){
     scope: CONFIG.SCOPES,
     callback: async (resp) => {
       if (resp.error) { console.error(resp); return; }
-      accessToken = resp.access_token;
-      localStorage.setItem('hg_token', accessToken);
-      localStorage.setItem('hg_token_ts', Date.now().toString());
+      applyToken(resp.access_token);
       await onSignedIn();
     },
   });
 
   $('#signInBtn').addEventListener('click', () => tokenClient.requestAccessToken({ prompt: 'consent' }));
   $('#signOutBtn').addEventListener('click', signOut);
+  window.__refreshTokenSilently = () => { tokenClient.requestAccessToken({ prompt: '' }); return Promise.resolve(true); };
 
-  // Reutiliza el token si sigue fresco (~50 min)
+  // Reutiliza el token si sigue fresco (~50 min); si no, intenta renovarlo sin
+  // mostrar ventanas (funciona si el navegador aún tiene la sesión de Google).
   const cached = localStorage.getItem('hg_token');
-  const ts = parseInt(localStorage.getItem('hg_token_ts') || '0', 10);
-  if (cached && Date.now() - ts < 50 * 60 * 1000) {
+  if (cached && tokenIsFresh()) {
     accessToken = cached;
     onSignedIn();
+  } else if (localStorage.getItem('hg_ever_signed_in') === '1') {
+    tokenClient.requestAccessToken({ prompt: '' });
   }
 }
 
+/* Renueva el token en segundo plano antes de que caduque, para que una sesión
+   larga (panel abierto horas) no se quede sin permiso a media tarea. */
+function scheduleTokenRefresh(){
+  setInterval(() => {
+    if (accessToken && typeof window.__refreshTokenSilently === 'function') window.__refreshTokenSilently();
+  }, 40 * 60 * 1000);
+}
+
 function signOut(){
-  if (accessToken) google.accounts.oauth2.revoke(accessToken, () => {});
+  if (accessToken && window.google && google.accounts) google.accounts.oauth2.revoke(accessToken, () => {});
   accessToken = null;
   localStorage.removeItem('hg_token');
   localStorage.removeItem('hg_token_ts');
+  localStorage.removeItem('hg_ever_signed_in');
   $('#signedInInfo').hidden = true;
   $('#signInBtn').hidden = false;
   $('#tabs').hidden = true;
@@ -137,6 +166,7 @@ async function onSignedIn(){
     await loadEvents();     // antes de openCuadrante: su sync al calendario necesita los eventos ya cargados
     await loadMinisterio();
     await loadTareas();
+    await applyWidgetPendingDone();
     await loadExplorerFavs();
     await loadConfig();
     await loadCuadrantesIndex();
@@ -152,10 +182,12 @@ async function onSignedIn(){
     renderMinisterio();
     renderTareas();
     renderAsignaciones();
+    updateScopeLabel();
+    renderSearchMatches();
     renderDashboard();
     handleLaunchParams();
     checkReminders();
-    setInterval(checkReminders, 60000);
+    if (!window.__remindersTimerOn) { window.__remindersTimerOn = true; setInterval(checkReminders, 60000); scheduleTokenRefresh(); }
   } catch (err) {
     console.error(err);
     showError('Hubo un problema conectando con Drive. Vuelve a intentar el inicio de sesión.');
@@ -168,7 +200,8 @@ async function onSignedIn(){
 function handleLaunchParams(){
   const q = new URLSearchParams(location.search);
   const go = q.get('go');
-  if (go && document.getElementById('tab-' + go)) activateTab(go);
+  if (go === 'proyectos') activateTab('proyectos');
+  else if (go && document.getElementById('tab-' + go)) activateTab(go);
   if (q.get('nueva') === '1' && go === 'tareas') setTimeout(() => openTareaModal(), 200);
   if (go || q.get('nueva')) history.replaceState(null, '', location.pathname);
 }
@@ -208,11 +241,13 @@ function showError(msg){
 }
 
 function activateTab(name){
+  if (name === 'proyectos') { tareasView = 'proyectos'; name = 'tareas'; }
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   $$('.panel').forEach(p => p.classList.toggle('active', p.id === `tab-${name}`));
   window.scrollTo({ top: 0, behavior: 'smooth' });
   closeDrawer();
   if (name === 'archivos' && !explorerLoaded && folderId) openExplorerFolder('root');
+  if (name === 'tareas') renderTareas();
 }
 $$('.tab').forEach(tab => tab.addEventListener('click', () => activateTab(tab.dataset.tab)));
 
@@ -511,12 +546,32 @@ async function chooseCuadranteDest(){
   return dest;
 }
 
+/* Nombre opcional para identificar el cuadrante en el historial (p. ej. "Grupo 2 — octubre"). */
+function askCuadranteLabel(){
+  return new Promise((resolve) => {
+    renderModal(`
+      <h3>Subir cuadrante</h3>
+      <div class="field"><label>Nombre (opcional, para identificarlo luego)</label>
+        <input id="cuLabel" placeholder="p. ej. Congregación Centro — octubre"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="modalCancel">Cancelar</button>
+        <button class="btn btn-primary" id="modalOk">Continuar</button>
+      </div>`);
+    $('#modalCancel').addEventListener('click', () => { closeModal(); resolve(null); });
+    $('#modalOk').addEventListener('click', () => { const v = $('#cuLabel').value.trim(); closeModal(); resolve({ nombre: v }); });
+    setTimeout(() => { const el = document.getElementById('cuLabel'); if (el) el.focus(); }, 50);
+  });
+}
+
 $('#pdfInput').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
   const isImage = file.type.startsWith('image/');
   const isPdf = file.type === 'application/pdf';
   if (!isImage && !isPdf) { showError('Sube un PDF o una imagen (JPG, PNG…).'); e.target.value = ''; return; }
+
+  const label = await askCuadranteLabel();
+  if (!label) { e.target.value = ''; return; }
 
   const dest = await chooseCuadranteDest();
   if (!dest) { e.target.value = ''; return; }
@@ -541,10 +596,11 @@ $('#pdfInput').addEventListener('change', async (e) => {
 
     currentParsed = await parseBlob(file, mime);
     const parseId = await saveFile(parseName, 'application/json', JSON.stringify(currentParsed, null, 2), folderId);
-    await mergeIntoHistorial(currentParsed);
+    await mergeIntoHistorial(currentParsed, stamp);
 
     const entry = {
       id: stamp, uploaded: new Date().toISOString(), mime, ext, tipo: currentParsed.tipo,
+      nombre: label.nombre || '',
       meses: mesesDe(currentParsed),
       fileId: meta.id, fileName: docName, parentId: dest.id, parentName: dest.name,
       parseId, parseName,
@@ -553,7 +609,7 @@ $('#pdfInput').addEventListener('change', async (e) => {
     await persistCuadrantesIndex();
     currentCuadranteId = stamp;
 
-    $('#cuadranteMeta').textContent = `${tipoLabel(currentParsed.tipo)}${entry.meses.length ? ' · ' + mesesLabel(entry.meses) : ''} · guardado en «${dest.name}»`;
+    $('#cuadranteMeta').textContent = `${entry.nombre ? entry.nombre + ' · ' : ''}${tipoLabel(currentParsed.tipo)}${entry.meses.length ? ' · ' + mesesLabel(entry.meses) : ''} · guardado en «${dest.name}»`;
     renderCuadranteHistory();
     renderDigitalView(currentParsed);
     renderNameMatches();
@@ -692,10 +748,10 @@ async function openCuadrante(id){
   if (!entry.meses || !entry.meses.length) { entry.meses = mesesDe(parsed); idxChanged = true; }
   if (idxChanged) { try { await persistCuadrantesIndex(); } catch (e) { /* no crítico */ } }
 
-  meta.textContent = `${tipoLabel(entry.tipo)}${entry.meses && entry.meses.length ? ' · ' + mesesLabel(entry.meses) : ''}`
+  meta.textContent = `${entry.nombre ? entry.nombre + ' · ' : ''}${tipoLabel(entry.tipo)}${entry.meses && entry.meses.length ? ' · ' + mesesLabel(entry.meses) : ''}`
     + (entry.parentName ? ` · «${entry.parentName}»` : '');
 
-  await mergeIntoHistorial(parsed);
+  await mergeIntoHistorial(parsed, entry.id);
   renderCuadranteHistory();
   renderDigitalView(parsed);
   renderNameMatches();
@@ -755,23 +811,50 @@ function renderCuadranteHistory(){
     <div class="ch-list">${cuadrantesIdx.map(c => {
       const tl = tipoLabel(c.tipo);
       const ml = mesesLabel(c.meses);
-      return `<div class="ch-item${c.id === currentCuadranteId ? ' active' : ''}" data-open="${escapeAttr(c.id)}" title="${escapeAttr(tl + (ml ? ' · ' + ml : ''))}">
+      return `<div class="ch-item${c.id === currentCuadranteId ? ' active' : ''}" data-open="${escapeAttr(c.id)}" title="${escapeAttr((c.nombre ? c.nombre + ' · ' : '') + tl + (ml ? ' · ' + ml : ''))}">
         <span class="ch-tipo ${c.tipo === 'entre-semana' ? 'is-es' : c.tipo === 'publica' ? 'is-fs' : ''}">${escapeHtml(tl)}</span>
+        ${c.nombre ? `<span class="ch-nombre">${escapeHtml(c.nombre)}</span>` : ''}
         <span class="ch-meses">${ml ? escapeHtml(ml) : 'sin fechas'}</span>
+        <button class="ch-edit" title="Renombrar" data-edit="${escapeAttr(c.id)}">✎</button>
         <button class="ch-del" title="Borrar" data-del="${escapeAttr(c.id)}">🗑</button>
       </div>`;
     }).join('')}</div>
     ${destLine}`;
   box.querySelectorAll('.ch-item').forEach(el => el.addEventListener('click', (e) => {
-    if (e.target.closest('.ch-del')) return;
+    if (e.target.closest('.ch-del') || e.target.closest('.ch-edit')) return;
     openCuadrante(el.dataset.open);
   }));
   box.querySelectorAll('.ch-del').forEach(b => b.addEventListener('click', (e) => {
     e.stopPropagation();
     deleteCuadrante(b.dataset.del);
   }));
+  box.querySelectorAll('.ch-edit').forEach(b => b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    editCuadranteLabel(b.dataset.edit);
+  }));
   const chg = document.getElementById('chChgDest');
   if (chg) chg.addEventListener('click', changeCuadranteDest);
+}
+
+function editCuadranteLabel(id){
+  const entry = cuadrantesIdx.find(c => c.id === id);
+  if (!entry) return;
+  renderModal(`
+    <h3>Nombre del cuadrante</h3>
+    <div class="field"><label>Nombre</label>
+      <input id="cuLabel2" value="${escapeAttr(entry.nombre || '')}" placeholder="p. ej. Congregación Centro — octubre"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="modalCancel">Cancelar</button>
+      <button class="btn btn-primary" id="modalOk">Guardar</button>
+    </div>`);
+  $('#modalCancel').addEventListener('click', closeModal);
+  $('#modalOk').addEventListener('click', async () => {
+    entry.nombre = $('#cuLabel2').value.trim();
+    closeModal();
+    showSand('Guardando…');
+    try { await persistCuadrantesIndex(); renderCuadranteHistory(); if (entry.id === currentCuadranteId) openCuadrante(entry.id); }
+    finally { hideSand(); }
+  });
 }
 
 async function changeCuadranteDest(){
@@ -913,11 +996,11 @@ function updateHiddenBar(){
   if (rb) rb.addEventListener('click', resetHidden);
 }
 
-async function mergeIntoHistorial(parsed){
+async function mergeIntoHistorial(parsed, srcId){
   const seen = new Set(currentHistorial.map(assignmentKey));
   let added = 0;
   (parsed.asignaciones || []).forEach(a => {
-    const record = { tipo: parsed.tipo, ...a };
+    const record = { tipo: parsed.tipo, ...a, ...(srcId ? { _src: srcId } : {}) };
     const key = assignmentKey(record);
     if (!seen.has(key)) { seen.add(key); currentHistorial.push(record); added++; }
   });
@@ -934,6 +1017,7 @@ $$('#viewToggle .vt-btn').forEach(btn => {
     const digital = btn.dataset.view === 'digital';
     $('#digitalView').hidden = !digital;
     $('#cuadranteViewer').hidden = digital;
+    if (!digital) gotoViewerPage(viewerPage); // ahora sí es visible: pdf.js puede pintar el canvas
   });
 });
 
@@ -942,27 +1026,116 @@ function setOriginalViewerEmpty(){
   viewer.hidden = false;
   viewer.classList.add('empty');
   viewer.innerHTML = '<p>Todavía no hay ningún cuadrante subido.</p>';
+  viewerPdfDoc = null;
 }
 
-function renderOriginalViewer(mime, url){
+/* Documento original: PDF se pinta con pdf.js en un <canvas> (el <embed> nativo
+   no siempre está disponible — en la APK no hay visor de PDF del sistema, así
+   que a veces se quedaba en blanco). Las imágenes se muestran tal cual. */
+let viewerPdfDoc = null, viewerPage = 1;
+
+async function renderOriginalViewer(mime, url){
   const viewer = $('#cuadranteViewer');
   viewer.classList.remove('empty');
   viewer.hidden = true; // por defecto se muestra la vista digital
-  if (mime === 'application/pdf') {
-    viewer.innerHTML = `<embed id="pdfEmbed" src="${url}" type="application/pdf">`;
-  } else {
+  viewerPdfDoc = null; viewerPage = 1;
+
+  if (mime !== 'application/pdf') {
     viewer.innerHTML = `<img id="pdfEmbed" src="${url}" alt="Cuadrante" style="width:100%; display:block;">`;
+    return;
+  }
+
+  viewer.innerHTML = `
+    <div class="pdfv-bar">
+      <button class="btn btn-ghost" id="pdfvPrev" aria-label="Página anterior">‹</button>
+      <span id="pdfvPage" class="pdfv-pagelbl">Cargando…</span>
+      <button class="btn btn-ghost" id="pdfvNext" aria-label="Página siguiente">›</button>
+    </div>
+    <div class="pdfv-canvas-wrap"><canvas id="pdfvCanvas"></canvas></div>`;
+  $('#pdfvPrev').addEventListener('click', () => gotoViewerPage(viewerPage - 1));
+  $('#pdfvNext').addEventListener('click', () => gotoViewerPage(viewerPage + 1));
+
+  try {
+    if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    viewerPdfDoc = await pdfjsLib.getDocument(url).promise;
+    const lbl = document.getElementById('pdfvPage');
+    if (lbl) lbl.textContent = `Página 1 / ${viewerPdfDoc.numPages}`;
+    // OJO: pdf.js se queda colgado si se pinta en un <canvas> dentro de un
+    // contenedor display:none — solo renderizamos si la vista ya es visible
+    // (si no, se pintará en cuanto el usuario pulse "Documento original").
+    if (!viewer.hidden) await gotoViewerPage(1);
+  } catch (err) {
+    console.error(err);
+    viewer.innerHTML = '<p>No se pudo mostrar el documento original en esta pantalla. La vista digital sigue disponible.</p>';
   }
 }
 
+/* Comprueba (muestreando una rejilla, barato) si el canvas sigue totalmente
+   transparente: el render de pdf.js a veces "resuelve" sin haber pintado nada
+   si el worker no cargó bien, así que no basta con mirar si la promesa cumplió. */
+function canvasLooksBlank(canvas){
+  try {
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width, h = canvas.height;
+    if (!w || !h) return true;
+    const stepX = Math.max(1, Math.floor(w / 14)), stepY = Math.max(1, Math.floor(h / 14));
+    for (let y = 0; y < h; y += stepY) {
+      for (let x = 0; x < w; x += stepX) {
+        if (ctx.getImageData(x, y, 1, 1).data[3] > 0) return false;
+      }
+    }
+    return true;
+  } catch (e) { return false; }
+}
+
+let viewerRenderTask = null;
+async function gotoViewerPage(n, _retrying){
+  if (!viewerPdfDoc || $('#cuadranteViewer').hidden) return;
+  n = Math.max(1, Math.min(viewerPdfDoc.numPages, n));
+  viewerPage = n;
+  const canvas = document.getElementById('pdfvCanvas');
+  const lbl = document.getElementById('pdfvPage');
+  if (!canvas) return;
+  if (viewerRenderTask) { try { viewerRenderTask.cancel(); } catch (e) {} viewerRenderTask = null; }
+  let ok = false;
+  try {
+    const page = await viewerPdfDoc.getPage(n);
+    const wrap = canvas.parentElement;
+    const baseVp = page.getViewport({ scale: 1 });
+    const scale = Math.max(0.5, (wrap.clientWidth || 320) / baseVp.width);
+    const vp = page.getViewport({ scale });
+    canvas.width = vp.width; canvas.height = vp.height;
+    const task = page.render({ canvasContext: canvas.getContext('2d'), viewport: vp });
+    viewerRenderTask = task;
+    // Salvaguarda: si el renderizado no responde (dispositivo lento, PDF pesado,
+    // o el worker de pdf.js no carga bien), no dejamos la pantalla colgada.
+    const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('render-timeout')), 12000));
+    await Promise.race([task.promise, timeout]);
+    viewerRenderTask = null;
+    ok = !canvasLooksBlank(canvas);
+  } catch (err) {
+    viewerRenderTask = null;
+    if (err && err.name !== 'RenderingCancelledException') console.error('Documento original:', err);
+  }
+  if (!ok && !_retrying) {
+    // Reintenta una vez sin worker dedicado (pdf.js cae a hilo principal): más
+    // lento, pero evita depender de que el navegador pueda crear el worker.
+    try {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = '';
+      viewerPdfDoc = await pdfjsLib.getDocument(currentDocUrl).promise;
+      return gotoViewerPage(n, true);
+    } catch (e2) { console.error('Documento original (reintento):', e2); }
+  }
+  if (lbl) lbl.textContent = ok ? `Página ${n} / ${viewerPdfDoc.numPages}` : 'No se pudo mostrar esta página. Toca ‹ o › para reintentar.';
+}
+
 function jumpToPage(page){
-  const embed = $('#pdfEmbed');
-  if (!embed || !currentDocUrl) return;
+  if (!currentDocUrl) return;
   activateTab('cuadrante');
   $$('#viewToggle .vt-btn').forEach(b => b.classList.toggle('active', b.dataset.view === 'original'));
   $('#digitalView').hidden = true;
-  $('#cuadranteViewer').hidden = false;
-  if (currentDocMime === 'application/pdf') embed.setAttribute('src', `${currentDocUrl}#page=${page}`);
+  $('#cuadranteViewer').hidden = false; // visible ANTES de renderizar (ver nota en gotoViewerPage)
+  if (currentDocMime === 'application/pdf') gotoViewerPage(page);
 }
 
 /* =========================================================
@@ -1581,27 +1754,20 @@ nameInput.addEventListener('change', async () => {
   renderDashboard();
 });
 
-/* Buscar asignación por nombre en el cuadrante actual (búsqueda en vivo) */
-{
-  const si = document.getElementById('searchNameInput');
-  if (si) {
-    let _t;
-    si.addEventListener('input', () => { clearTimeout(_t); _t = setTimeout(renderSearchMatches, 220); });
-  }
-}
-
-function findMyAssignments(historial, name){
+function findMyAssignments(historial, name, scopeIds){
   if (!historial || !name) return [];
   const target = normalizeText(name);
+  const scoped = Array.isArray(scopeIds) && scopeIds.length > 0;
   const out = [];
 
   historial.forEach(a => {
+    if (scoped && a._src && !scopeIds.includes(a._src)) return;
     const k = assignmentKey(a);
     if (hiddenKeys.has(k)) return;
     if (a.tipo === 'entre-semana') {
       const nombres = a.nombres || [];
       if (nombres.some(n => normalizeText(n).includes(target))) {
-        out.push({ _key: k, tipo: 'entre-semana', fecha: a.fecha, hora: a.hora || '', categoria: categorizeMidweekRow(a), nombreTexto: nombres.join(' / ') });
+        out.push({ _key: k, tipo: 'entre-semana', fecha: a.fecha, hora: a.hora || '', categoria: categorizeMidweekRow(a), nombreTexto: nombres.join(' / '), _src: a._src });
       }
     } else if (a.tipo === 'publica') {
       if (a.asamblea) return;
@@ -1611,7 +1777,7 @@ function findMyAssignments(historial, name){
       ];
       campos.forEach(([key, label]) => {
         if (a[key] && normalizeText(a[key]).includes(target)) {
-          out.push({ _key: k, tipo: 'publica', fecha: a.fecha, hora: '', categoria: label, nombreTexto: a[key] });
+          out.push({ _key: k, tipo: 'publica', fecha: a.fecha, hora: '', categoria: label, nombreTexto: a[key], _src: a._src });
         }
       });
     }
@@ -1649,29 +1815,68 @@ function renderNameMatches(){
 }
 
 /* Búsqueda de asignaciones por nombre en el CUADRANTE ACTUAL. */
-function findAssignmentsInParsed(parsed, name){
-  if (!parsed || !parsed.asignaciones || !name) return [];
-  const target = normalizeText(name);
-  const tipo = parsed.tipo;
-  const out = [];
-  parsed.asignaciones.forEach(a => {
-    const k = keyOf(a, tipo);
-    if (tipo === 'entre-semana') {
-      const nombres = a.nombres || [];
-      if (nombres.some(n => normalizeText(n).includes(target))) {
-        out.push({ _key: k, tipo, fecha: a.fecha, hora: a.hora || '', categoria: categorizeMidweekRow(a), nombreTexto: nombres.join(' / ') });
-      }
-    } else if (tipo === 'publica' && !a.asamblea) {
-      [['discursante', 'Discurso público'], ['presidente', 'Presidencia'],
-       ['lectorAtalaya', 'Lectura de La Atalaya'], ['oracionConclusion', 'Oración de conclusión']]
-        .forEach(([f, label]) => {
-          if (a[f] && normalizeText(a[f]).includes(target)) {
-            out.push({ _key: k, tipo, fecha: a.fecha, hora: '', categoria: label, nombreTexto: a[f] });
-          }
-        });
-    }
-  });
-  return out;
+/* ---------- Buscar asignación por nombre (pestaña Asignaciones), en el
+   historial completo, limitado a los cuadrantes que el usuario elija ---------- */
+{
+  const si = document.getElementById('searchNameInput');
+  if (si) {
+    let _t;
+    si.addEventListener('input', () => { clearTimeout(_t); _t = setTimeout(renderSearchMatches, 220); });
+  }
+  const sb = document.getElementById('scopePickerBtn');
+  if (sb) sb.addEventListener('click', openScopePicker);
+}
+
+function cuadranteLabel(c){
+  const tl = tipoLabel(c.tipo);
+  const ml = mesesLabel(c.meses);
+  return (c.nombre ? c.nombre + ' · ' : '') + tl + (ml ? ' · ' + ml : '');
+}
+function scopeSummaryLabel(){
+  const ids = appConfig.searchScope || [];
+  if (!ids.length) return 'Todos los cuadrantes';
+  if (ids.length === 1) {
+    const c = cuadrantesIdx.find(x => x.id === ids[0]);
+    return c ? cuadranteLabel(c) : '1 cuadrante';
+  }
+  return `${ids.length} cuadrantes seleccionados`;
+}
+function updateScopeLabel(){
+  const el = document.getElementById('scopePickerLabel');
+  if (el) el.textContent = scopeSummaryLabel();
+}
+
+function openScopePicker(){
+  let sel = new Set(appConfig.searchScope || []);
+  const allMode = () => sel.size === 0;
+  const html = () => `
+    <h3>Buscar en…</h3>
+    <label class="sc-row"><input type="checkbox" id="scAll" ${allMode() ? 'checked' : ''}><strong>Todos los cuadrantes</strong></label>
+    <div class="sc-list">${cuadrantesIdx.length ? cuadrantesIdx.map(c => `
+        <label class="sc-row"><input type="checkbox" data-c="${escapeAttr(c.id)}" ${!allMode() && sel.has(c.id) ? 'checked' : ''}>
+          <span>${escapeHtml(cuadranteLabel(c))}</span></label>`).join('')
+      : '<p class="empty-note">Aún no hay cuadrantes subidos.</p>'}</div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="modalCancel">Cancelar</button>
+      <button class="btn btn-primary" id="modalOk">Guardar</button>
+    </div>`;
+  function wire(){
+    $('#scAll').addEventListener('change', (e) => { if (e.target.checked) sel.clear(); renderModal(html()); wire(); });
+    $$('#modalRoot .sc-list [data-c]').forEach(cb => cb.addEventListener('change', () => {
+      if (cb.checked) sel.add(cb.dataset.c); else sel.delete(cb.dataset.c);
+      renderModal(html()); wire();
+    }));
+    $('#modalCancel').addEventListener('click', closeModal);
+    $('#modalOk').addEventListener('click', async () => {
+      appConfig.searchScope = [...sel];
+      closeModal();
+      try { await persistConfig(); } catch (e) { /* no crítico */ }
+      updateScopeLabel();
+      renderSearchMatches();
+    });
+  }
+  renderModal(html());
+  wire();
 }
 
 function renderSearchMatches(){
@@ -1679,22 +1884,16 @@ function renderSearchMatches(){
   const inp = document.getElementById('searchNameInput');
   if (!box || !inp) return;
   const name = inp.value.trim();
-  const prev = searchName;
-  searchName = name;
-
-  if (!name) {
-    box.hidden = true; box.innerHTML = '';
-    if (prev) renderDigitalView(currentParsed); // quita resaltados
-    return;
-  }
+  if (!name) { box.hidden = true; box.innerHTML = ''; return; }
   box.hidden = false;
-  const matches = findAssignmentsInParsed(currentParsed, name);
+  const scope = appConfig.searchScope || [];
+  const scoped = scope.length > 0;
+  const matches = findMyAssignments(currentHistorial, name, scope);
   box.innerHTML = matches.length
-    ? `<p class="nm-status">${matches.length} coincidencia${matches.length === 1 ? '' : 's'} para «${escapeHtml(name)}» en este cuadrante:</p>
+    ? `<p class="nm-status">${matches.length} coincidencia${matches.length === 1 ? '' : 's'} para «${escapeHtml(name)}»${scoped ? ' en los cuadrantes seleccionados' : ''}:</p>
        <ul class="nm-cards">${matches.map(m => nmCard(m, name)).join('')}</ul>`
-    : `<p class="nm-status">Sin coincidencias para «${escapeHtml(name)}» en el cuadrante actual.</p>`;
+    : `<p class="nm-status">Sin coincidencias para «${escapeHtml(name)}»${scoped ? ' en los cuadrantes seleccionados' : ''}.</p>`;
   wireAssignmentActions(box);
-  renderDigitalView(currentParsed); // resalta las filas en la vista digital
 }
 
 /* =========================================================
@@ -1819,7 +2018,53 @@ async function persistEvents(){
   await saveFile(CONFIG.EVENTS_NAME, 'application/json', JSON.stringify(events, null, 2), folderId);
 }
 
-function eventsOn(dateStr){ return events.filter(e => e.date === dateStr); }
+/* =========================================================
+   Eventos recurrentes: 'none' | 'diario' | 'semanal' | 'mensual', con
+   'recurUntil' opcional. Los no recurrentes solo "ocupan" `date`.
+   ========================================================= */
+function isoOfDate(d){
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function stepOccurrence(d, recur){
+  if (recur === 'mensual') d.setMonth(d.getMonth() + 1);
+  else if (recur === 'semanal') d.setDate(d.getDate() + 7);
+  else d.setDate(d.getDate() + 1); // 'diario'
+}
+/* Próxima ocurrencia de `ev` en fromISO o después (null si ya no quedan). */
+function nextOccurrenceISO(ev, fromISO){
+  if (!ev.recur || ev.recur === 'none') return ev.date >= fromISO ? ev.date : null;
+  if (ev.date >= fromISO) return ev.date;
+  const until = ev.recurUntil || null;
+  let d = new Date(ev.date + 'T00:00');
+  const from = new Date(fromISO + 'T00:00');
+  let guard = 0;
+  while (d < from && guard++ < 3000) {
+    stepOccurrence(d, ev.recur);
+    if (until && isoOfDate(d) > until) return null;
+  }
+  const iso = isoOfDate(d);
+  if (until && iso > until) return null;
+  return iso;
+}
+/* Todas las ocurrencias de `ev` dentro de [fromISO, toISO] (tope 300, por seguridad). */
+function occurrencesInRange(ev, fromISO, toISO){
+  const out = [];
+  let cur = nextOccurrenceISO(ev, fromISO);
+  let guard = 0;
+  while (cur && cur <= toISO && guard++ < 300) {
+    out.push(cur);
+    if (!ev.recur || ev.recur === 'none') break;
+    const d = new Date(cur + 'T00:00');
+    stepOccurrence(d, ev.recur);
+    const iso = isoOfDate(d);
+    if (ev.recurUntil && iso > ev.recurUntil) break;
+    cur = iso;
+  }
+  return out;
+}
+const RECUR_LABELS = { diario: 'Cada día', semanal: 'Cada semana', mensual: 'Cada mes' };
+
+function eventsOn(dateStr){ return events.filter(e => occurrencesInRange(e, dateStr, dateStr).length > 0); }
 
 /* ---------- Volcado automático de "mis asignaciones" al calendario ---------- */
 const MONTHS_ES = {
@@ -1937,11 +2182,12 @@ function gcalDesired(){
   const inWin = (d) => d && d >= today && d <= endISO;
   const out = [];
   events.forEach(e => {
-    if (!inWin(e.date)) return;
+    const occ = (e.recur && e.recur !== 'none') ? nextOccurrenceISO(e, today) : e.date;
+    if (!inWin(occ)) return;
     out.push({
       hgKey: 'ev:' + e.id,
-      summary: (e.kind === 'reunion' ? '📅 ' : e.auto ? '📌 ' : '🗓 ') + e.title,
-      date: e.date, time: e.time || '', description: e.notes || '',
+      summary: (e.kind === 'reunion' ? '📅 ' : e.auto ? '📌 ' : '🗓 ') + e.title + (e.recur && e.recur !== 'none' ? ' ↻' : ''),
+      date: occ, time: e.time || '', description: e.notes || '', mins: itemAlertMins(e),
     });
   });
   tareas.forEach(t => {
@@ -1950,7 +2196,7 @@ function gcalDesired(){
       hgKey: 'tk:' + t.id,
       summary: '✅ ' + t.title,
       date: t.due, time: t.time || '',
-      description: (t.project ? `Proyecto: ${t.project}\n` : '') + (t.notes || ''),
+      description: (t.project ? `Proyecto: ${t.project}\n` : '') + (t.notes || ''), mins: itemAlertMins(t),
     });
   });
   return out;
@@ -1961,7 +2207,7 @@ function gcalBody(it, tz){
     summary: it.summary,
     description: it.description || '',
     extendedProperties: { private: { hgKey: it.hgKey, hgManaged: '1' } },
-    reminders: { useDefault: false, overrides: alertMins().map(m => ({ method: 'popup', minutes: m })) },
+    reminders: { useDefault: false, overrides: (it.mins || alertMins()).map(m => ({ method: 'popup', minutes: m })) },
   };
   if (/^\d{2}:\d{2}$/.test(it.time || '')) {
     const [h, mn] = it.time.split(':').map(Number);
@@ -2087,6 +2333,17 @@ const ALERT_PRESETS = [
   { v: [1440, 60], t: '1 día y 1 h antes' },
   { v: [2880, 1440, 120], t: '2 días, 1 día y 2 h antes' },
 ];
+/* Select de aviso reutilizado en eventos/tareas: vacío = usar el predeterminado. */
+function remindSelectHtml(id, current){
+  const cur = Array.isArray(current) && current.length ? JSON.stringify(current) : '';
+  return `<select id="${id}"><option value="">Usar el predeterminado</option>${ALERT_PRESETS.map(p =>
+    `<option value='${JSON.stringify(p.v)}' ${JSON.stringify(p.v) === cur ? 'selected' : ''}>${p.t}</option>`).join('')}</select>`;
+}
+function readRemindSelect(id){
+  const el = document.getElementById(id);
+  if (!el || !el.value) return undefined;
+  try { return JSON.parse(el.value); } catch (e) { return undefined; }
+}
 function renderCalSettings(){
   const box = document.getElementById('calSettings');
   if (!box) return;
@@ -2139,8 +2396,9 @@ function renderUpcoming(){
   const today = new Date().toISOString().slice(0, 10);
 
   const items = events
-    .filter(e => e.date >= today)
-    .map(e => ({ t: 'ev', date: e.date, time: e.time || '', ev: e }))
+    .map(e => ({ e, occ: nextOccurrenceISO(e, today) }))
+    .filter(x => x.occ)
+    .map(x => ({ t: 'ev', date: x.occ, time: x.e.time || '', ev: x.e }))
     .concat(tareas.filter(t => !t.done && t.due && t.due >= today)
       .map(t => ({ t: 'tk', date: t.due, time: t.time || '', tk: t })))
     .sort((a, b) => (a.date + (a.time || '99:99')).localeCompare(b.date + (b.time || '99:99')))
@@ -2160,7 +2418,7 @@ function renderUpcoming(){
       if (ev.auto) li.className = 'ev-auto';
       li.innerHTML = `
         <span class="ev-date">${dateLabel}</span>
-        <span class="ev-title">${ev.auto ? '📋 ' : ev.kind === 'reunion' ? '📅 ' : ''}${escapeHtml(ev.title)}${ev.auto && ev.notes ? ` <em>· ${escapeHtml(ev.notes)}</em>` : ''}</span>
+        <span class="ev-title">${ev.auto ? '📋 ' : ev.kind === 'reunion' ? '📅 ' : ''}${escapeHtml(ev.title)}${ev.recur && ev.recur !== 'none' ? ' <span class=\"ev-recur\" title=\"Recurrente\">↻</span>' : ''}${ev.auto && ev.notes ? ` <em>· ${escapeHtml(ev.notes)}</em>` : ''}</span>
         <span class="ev-actions">
           <button class="icon-btn" title="Descargar .ics" data-ics="${ev.id}">⇩</button>
           ${ev.auto ? '' : `<button class="icon-btn" title="Editar" data-edit="${ev.id}">✎</button>`}
@@ -2230,11 +2488,26 @@ function openDayModal(dateStr){
 
 function openEventModal(id, presetDate){
   const existing = id ? events.find(e => e.id === id) : null;
+  const recur = existing ? existing.recur || 'none' : 'none';
   renderModal(`
     <h3>${existing ? 'Editar evento' : 'Nuevo evento'}</h3>
     <div class="field"><label>Título</label><input id="fTitle" value="${existing ? escapeAttr(existing.title) : ''}" placeholder="Reunión de entre semana"></div>
     <div class="field"><label>Fecha</label><input id="fDate" type="date" value="${existing ? existing.date : (presetDate || new Date().toISOString().slice(0,10))}"></div>
     <div class="field"><label>Hora (opcional)</label><input id="fTime" type="time" value="${existing ? existing.time || '' : ''}"></div>
+    <div class="field" style="flex-direction:row; gap:10px;">
+      <div style="flex:1; display:flex; flex-direction:column; gap:5px;"><label>Repetir</label>
+        <select id="fRecur">
+          <option value="none"${recur === 'none' ? ' selected' : ''}>No se repite</option>
+          <option value="diario"${recur === 'diario' ? ' selected' : ''}>Cada día</option>
+          <option value="semanal"${recur === 'semanal' ? ' selected' : ''}>Cada semana</option>
+          <option value="mensual"${recur === 'mensual' ? ' selected' : ''}>Cada mes</option>
+        </select>
+      </div>
+      <div id="fRecurUntilWrap" style="flex:1; display:flex; flex-direction:column; gap:5px; ${recur === 'none' ? 'visibility:hidden;' : ''}">
+        <label>Hasta (opcional)</label><input id="fRecurUntil" type="date" value="${existing ? existing.recurUntil || '' : ''}">
+      </div>
+    </div>
+    <div class="field"><label>Aviso</label>${remindSelectHtml('fRemindMins', existing ? existing.remindMins : null)}</div>
     <div class="field"><label>Notas</label><textarea id="fNotes">${existing ? escapeHtml(existing.notes || '') : ''}</textarea></div>
     <div class="field" style="flex-direction:row; align-items:center; gap:8px;">
       <input type="checkbox" id="fReunion" ${existing && existing.kind === 'reunion' ? 'checked' : ''} style="width:auto;">
@@ -2242,7 +2515,7 @@ function openEventModal(id, presetDate){
     </div>
     <div class="field" style="flex-direction:row; align-items:center; gap:8px;">
       <input type="checkbox" id="fRemind" ${existing && existing.remind === false ? '' : 'checked'} style="width:auto;">
-      <label style="margin:0;">Avisarme mientras tenga el panel abierto</label>
+      <label style="margin:0;">Avisarme (notificación de la app, con hora puesta)</label>
     </div>
     <div class="modal-actions">
       ${existing ? '<button class="btn btn-ghost" id="modalDelete" style="color:#B4432D;">Eliminar</button>' : ''}
@@ -2250,12 +2523,16 @@ function openEventModal(id, presetDate){
       <button class="btn btn-primary" id="modalSave">Guardar</button>
     </div>
   `);
+  $('#fRecur').addEventListener('change', () => {
+    $('#fRecurUntilWrap').style.visibility = $('#fRecur').value === 'none' ? 'hidden' : 'visible';
+  });
   $('#modalCancel').addEventListener('click', closeModal);
   if (existing) $('#modalDelete').addEventListener('click', () => { deleteEvent(existing.id); closeModal(); });
   $('#modalSave').addEventListener('click', async () => {
     const title = $('#fTitle').value.trim();
     const date = $('#fDate').value;
     if (!title || !date) { showError('Falta título o fecha.'); return; }
+    const recurVal = $('#fRecur').value;
     const data = {
       id: existing ? existing.id : 'e_' + Date.now(),
       title, date,
@@ -2263,8 +2540,11 @@ function openEventModal(id, presetDate){
       notes: $('#fNotes').value.trim(),
       remind: $('#fRemind').checked,
       kind: $('#fReunion').checked ? 'reunion' : 'evento',
+      recur: recurVal === 'none' ? undefined : recurVal,
+      recurUntil: recurVal === 'none' ? undefined : ($('#fRecurUntil').value || undefined),
+      remindMins: readRemindSelect('fRemindMins'),
     };
-    if (existing) Object.assign(existing, data);
+    if (existing) { delete existing.recur; delete existing.recurUntil; delete existing.remindMins; Object.assign(existing, data); }
     else events.push(data);
     closeModal();
     showSand('Guardando en Drive…');
@@ -2302,22 +2582,36 @@ function downloadIcs(id){
   a.click();
 }
 
-/* Todos los avisos con fecha+hora futura: eventos (salvo remind:false), tareas
-   pendientes y asignaciones aprobadas. */
+/* Todos los avisos con fecha+hora futura: eventos (salvo remind:false, incluidas
+   sus próximas ocurrencias si son recurrentes), tareas pendientes y asignaciones
+   aprobadas. Cada uno lleva su `mins` (aviso propio, o el predeterminado). */
+function itemAlertMins(item){
+  return (item && Array.isArray(item.remindMins) && item.remindMins.length) ? item.remindMins : alertMins();
+}
 function upcomingAlerts(){
   const out = [];
-  events.forEach(e => { if (e.remind !== false && e.date && /^\d{2}:\d{2}$/.test(e.time || '')) out.push({ id: 'ev:' + e.id, date: e.date, time: e.time, title: (e.kind === 'reunion' ? '📅 ' : '') + e.title }); });
-  tareas.forEach(t => { if (!t.done && t.due && /^\d{2}:\d{2}$/.test(t.time || '')) out.push({ id: 'tk:' + t.id, date: t.due, time: t.time, title: '✅ ' + t.title }); });
-  savedList.forEach(s => { const d = savedIsoOf(s); if (d && /^\d{1,2}:\d{2}$/.test(s.hora || '')) out.push({ id: 'as:' + s.key, date: d, time: s.hora.replace(/^(\d):/, '0$1:'), title: '📌 ' + s.categoria }); });
+  const today = todayISO();
+  const horizon = new Date(); horizon.setDate(horizon.getDate() + 45);
+  const horizonISO = isoOfDate(horizon);
+  events.forEach(e => {
+    if (e.remind === false || !/^\d{2}:\d{2}$/.test(e.time || '')) return;
+    const dates = (e.recur && e.recur !== 'none') ? occurrencesInRange(e, today, horizonISO) : [nextOccurrenceISO(e, today)].filter(Boolean);
+    dates.forEach(d => out.push({
+      id: 'ev:' + e.id + (dates.length > 1 ? ':' + d : ''), date: d, time: e.time,
+      title: (e.kind === 'reunion' ? '📅 ' : '') + e.title, mins: itemAlertMins(e),
+    }));
+  });
+  tareas.forEach(t => { if (!t.done && t.due && /^\d{2}:\d{2}$/.test(t.time || '')) out.push({ id: 'tk:' + t.id, date: t.due, time: t.time, title: '✅ ' + t.title, mins: itemAlertMins(t) }); });
+  savedList.forEach(s => { const d = savedIsoOf(s); if (d && /^\d{1,2}:\d{2}$/.test(s.hora || '')) out.push({ id: 'as:' + s.key, date: d, time: s.hora.replace(/^(\d):/, '0$1:'), title: '📌 ' + s.categoria, mins: alertMins() }); });
   return out;
 }
 
 function checkReminders(){
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
   const now = new Date();
-  const lead = Math.max(30, ...alertMins());
   upcomingAlerts().forEach(a => {
     if (notifiedIds.has(a.id)) return;
+    const lead = Math.max(30, ...a.mins);
     const diffMin = (new Date(`${a.date}T${a.time}`) - now) / 60000;
     if (diffMin > 0 && diffMin <= lead) {
       notifiedIds.add(a.id);
@@ -2351,11 +2645,10 @@ async function scheduleLocalNotifs(){
     const pend = await LN.getPending();
     if (pend.notifications && pend.notifications.length) await LN.cancel({ notifications: pend.notifications.map(n => ({ id: n.id })) });
     const now = Date.now();
-    const mins = alertMins();
     const toSchedule = [];
     upcomingAlerts().forEach(a => {
       const at = new Date(`${a.date}T${a.time}`).getTime();
-      mins.forEach(lead => {
+      a.mins.forEach(lead => {
         const when = at - lead * 60000;
         if (when > now + 5000) {
           toSchedule.push({
@@ -2738,8 +3031,13 @@ function renderTareasFiltros(){
 function renderTareas(){
   const list = document.getElementById('tareasList');
   if (!list) return;
-  renderTareasFiltros();
   document.querySelectorAll('#tareasNav .tk-vbtn').forEach(b => b.classList.toggle('active', b.dataset.view === tareasView));
+  document.getElementById('addTareaBtn').hidden = tareasView === 'proyectos';
+  document.getElementById('addProyectoBtn').hidden = tareasView !== 'proyectos';
+  document.getElementById('proyectosList').hidden = tareasView !== 'proyectos';
+  list.hidden = tareasView === 'proyectos';
+  if (tareasView === 'proyectos') { document.getElementById('tareasFiltros').hidden = true; renderProyectos(); return; }
+  renderTareasFiltros();
 
   const rows = tareasForView();
   if (!rows.length) {
@@ -2849,6 +3147,7 @@ function openTareaModal(id, preset){
     </div>
     <div class="field"><label>Etiquetas (separadas por comas)</label>
       <input id="tLabels" value="${t ? escapeAttr((t.labels || []).join(', ')) : ''}" placeholder="urgente, ministerio"></div>
+    <div class="field"><label>Aviso (si pones fecha y hora)</label>${remindSelectHtml('tRemindMins', t ? t.remindMins : null)}</div>
     <div class="field"><label>Subtareas</label><div id="stWrap">${subsHtml()}</div>
       <button class="btn btn-ghost" id="addStBtn" style="align-self:flex-start;">+ Añadir subtarea</button></div>
     <div class="field"><label>Documentos de Drive</label>
@@ -2901,6 +3200,7 @@ function openTareaModal(id, preset){
       doneAt: t ? t.doneAt || null : null,
       due: $('#tDue').value || '',
       time: $('#tTime').value || '',
+      remindMins: readRemindSelect('tRemindMins'),
       priority: parseInt($('#tPrio').value, 10) || 2,
       project: $('#tProj').value.trim(),
       proyectoId: proyId || null,
@@ -2940,12 +3240,16 @@ function renderDashboard(){
     .sort((a, b) => a.iso.localeCompare(b.iso))
     .slice(0, 6);
 
-  const reuniones = events
-    .filter(e => !e.auto && e.kind === 'reunion' && e.date >= today)
+  const eventosOcc = events
+    .filter(e => !e.auto)
+    .map(e => { const occ = nextOccurrenceISO(e, today); return occ ? { ...e, date: occ } : null; })
+    .filter(Boolean);
+  const reuniones = eventosOcc
+    .filter(e => e.kind === 'reunion')
     .sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')))
     .slice(0, 5);
-  const otrosEventos = events
-    .filter(e => !e.auto && e.kind !== 'reunion' && e.date >= today)
+  const otrosEventos = eventosOcc
+    .filter(e => e.kind !== 'reunion')
     .sort((a, b) => (a.date + (a.time || '')).localeCompare(b.date + (b.time || '')))
     .slice(0, 5);
 
@@ -3008,28 +3312,159 @@ function renderDashboard(){
   pushWidgetData();
 }
 
+function isoOf(d){
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+/* Lunes..domingo de la semana que contiene `iso`. */
+function weekRangeISO(iso){
+  const d = new Date(iso + 'T00:00');
+  const off = (d.getDay() + 6) % 7;
+  const mon = new Date(d); mon.setDate(d.getDate() - off);
+  const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+  return { start: isoOf(mon), end: isoOf(sun) };
+}
+
+/* Reúne todas mis asignaciones futuras (cuadrante + guardadas a mano), ordenadas. */
+function myFutureAssignments(){
+  const today = todayISO();
+  const name = (nameInput.value || '').trim();
+  const pad = h => /^\d{1,2}:\d{2}$/.test(h || '') ? h.replace(/^(\d):/, '0$1:') : '';
+  const list = [];
+  findMyAssignments(currentHistorial, name).forEach(m => {
+    const iso = assignmentDateISO(m.fecha);
+    if (iso && iso >= today) list.push({ iso, hora: pad(m.hora), cat: m.categoria });
+  });
+  savedList.forEach(s => {
+    const iso = savedIsoOf(s);
+    if (iso && iso >= today) list.push({ iso, hora: pad(s.hora), cat: s.categoria });
+  });
+  const seen = new Set();
+  return list
+    .filter(x => { const k = x.iso + '|' + x.cat; if (seen.has(k)) return false; seen.add(k); return true; })
+    .sort((a, b) => (a.iso + (a.hora || '99:99')).localeCompare(b.iso + (b.hora || '99:99')));
+}
+
 /* Envía un resumen a los widgets nativos de Android (no-op en web). */
 function pushWidgetData(){
   const WB = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.WidgetBridge;
   if (!WB) return;
   try {
     const today = todayISO();
-    const name = (nameInput.value || '').trim();
+    const mine = myFutureAssignments();
+
+    // --- Próxima asignación (2×2) ---
+    const nx = mine[0];
+    const proxima = nx ? {
+      cat: nx.cat,
+      fecha: new Date(nx.iso + 'T00:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'short' }),
+      hora: nx.hora || '',
+    } : '';
+
+    // --- Hoy (4×2): eventos + tareas de hoy, por hora ---
     const hoy = []
-      .concat(tareas.filter(t => !t.done && t.due === today).map(t => t.title))
-      .concat(findMyAssignments(currentHistorial, name).filter(m => assignmentDateISO(m.fecha) === today).map(m => m.categoria))
-      .concat(savedList.filter(s => savedIsoOf(s) === today).map(s => s.categoria))
-      .slice(0, 6);
-    const nextEv = events
-      .filter(e => e.date >= today && (e.kind === 'reunion'))
-      .sort((a, b) => a.date.localeCompare(b.date))[0];
+      .concat(eventsOn(today).map(e => ({
+        id: 'ev_' + (e.id || hashStr(e.title + e.date)),
+        t: e.title, time: e.time || '', kind: 'event',
+      })))
+      .concat(tareas.filter(t => !t.done && t.due === today).map(t => ({
+        id: t.id, t: t.title, time: t.time || '', kind: 'task',
+      })))
+      .sort((a, b) => (a.time || '99:99').localeCompare(b.time || '99:99'))
+      .slice(0, 8);
+
+    // --- Cuadrante de esta semana (4×2): mis partes lunes..domingo ---
+    const wk = weekRangeISO(today);
+    const semLines = mine
+      .filter(m => m.iso >= wk.start && m.iso <= wk.end)
+      .map(m => (m.hora ? m.hora + ' · ' : '') + m.cat);
+    const semana = semLines.length ? { titulo: 'Esta semana', lineas: semLines.slice(0, 6) } : '';
+
+    // --- Calendario mensual (4×4): mes de hoy ---
+    const now = new Date();
+    const y = now.getFullYear(), mo = now.getMonth();
+    const first = new Date(y, mo, 1);
+    const dim = new Date(y, mo + 1, 0).getDate();
+    const marks = {};
+    for (let d = 1; d <= dim; d++) {
+      const iso = `${y}-${String(mo + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      let bit = 0;
+      if (eventsOn(iso).length) bit |= 1;
+      if (tareas.some(t => !t.done && t.due === iso)) bit |= 2;
+      if (bit) marks[d] = bit;
+    }
+    const monEndISO = isoOf(new Date(y, mo + 1, 0));
+    const mes = {
+      y, m: mo,
+      label: first.toLocaleDateString('es-ES', { month: 'long' }) + ' ' + y,
+      start: (first.getDay() + 6) % 7,
+      days: dim,
+      today: now.getDate(),
+      marks,
+      agenda: agendaItemsInRange(today, monEndISO, 3), // franja de agenda bajo la rejilla
+    };
+
+    // --- Modos del widget "Hoy" (se puede alternar hoy/semana/mes/todo tocándolo) ---
+    const horizonISO = isoOf(new Date(now.getTime() + 30 * 86400000));
+    const agendaModes = {
+      hoy,
+      semana: agendaItemsInRange(today, wk.end, 20),
+      mes: agendaItemsInRange(today, monEndISO, 30),
+      todo: agendaItemsInRange(today, horizonISO, 40),
+    };
+
     WB.save({
-      hoy: JSON.stringify(hoy),
-      reunion: nextEv ? `${nextEv.title} · ${new Date(nextEv.date + 'T00:00').toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' })}` : '',
-      horas: fmtDur(ministerioTotals().mes),
+      w_proxima: JSON.stringify(proxima),
+      w_hoy: JSON.stringify(hoy),
+      w_semana: JSON.stringify(semana),
+      w_mes: JSON.stringify(mes),
+      w_agenda_modes: JSON.stringify(agendaModes),
     }).catch(() => {});
   } catch (e) { /* no crítico */ }
 }
+
+/* Eventos (con ocurrencias si son recurrentes) + tareas pendientes entre dos
+   fechas ISO, para las vistas semana/mes/todo del widget "Hoy" y la agenda
+   del widget de mes. Cada item lleva `d` (fecha corta) además de `time`. */
+function agendaItemsInRange(fromISO, toISO, cap){
+  const shortDate = (iso) => new Date(iso + 'T00:00').toLocaleDateString('es-ES', { day: 'numeric', month: 'short' });
+  const items = []
+    .concat(events.flatMap(e => occurrencesInRange(e, fromISO, toISO).map(d => ({
+      id: 'ev_' + (e.id || hashStr(e.title + d)) + '_' + d, t: e.title, time: e.time || '', kind: 'event', _d: d,
+    }))))
+    .concat(tareas.filter(t => !t.done && t.due && t.due >= fromISO && t.due <= toISO).map(t => ({
+      id: t.id, t: t.title, time: t.time || '', kind: 'task', _d: t.due,
+    })));
+  items.sort((a, b) => (a._d + (a.time || '99:99')).localeCompare(b._d + (b.time || '99:99')));
+  return items.slice(0, cap || 40).map(({ _d, ...rest }) => ({ ...rest, d: shortDate(_d) }));
+}
+
+/* Aplica las tareas marcadas como hechas desde el widget (se llama al arrancar). */
+async function applyWidgetPendingDone(){
+  const WB = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.WidgetBridge;
+  if (!WB || typeof WB.takePendingDone !== 'function') return;
+  let ids = [];
+  try { const r = await WB.takePendingDone(); ids = (r && r.ids) || []; }
+  catch (e) { return; }
+  if (!ids.length) return;
+  let changed = false;
+  ids.forEach(id => {
+    const t = tareas.find(x => x.id === id);
+    if (t && !t.done) { t.done = true; t.doneAt = new Date().toISOString(); changed = true; }
+  });
+  if (changed) { try { await persistTareas(); } catch (e) { /* se reintenta al próximo cambio */ } }
+}
+
+/* El widget del mes abre un día concreto (lo llama MainActivity al pulsar una celda). */
+window.openDayFromWidget = function(iso){
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso || '')) return;
+  try { activateTab('calendario'); } catch (e) {}
+  try {
+    const d = new Date(iso + 'T00:00');
+    calMonth = new Date(d.getFullYear(), d.getMonth(), 1);
+    renderCalendar();
+    openDayModal(iso);
+  } catch (e) {}
+};
 
 /* =========================================================
    Explorador de Drive (solo lectura de tus carpetas)
