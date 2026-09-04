@@ -176,6 +176,13 @@ input, textarea, select{font-family:var(--font-body); color:var(--ink);}
 }
 .pdf-viewer.empty{display:flex; align-items:center; justify-content:center; color:var(--ink-soft); min-height:220px; text-align:center; padding:20px;}
 .pdf-viewer embed, .pdf-viewer iframe{width:100%; height:70vh; border:none; display:block;}
+.pdfv-bar{
+  display:flex; align-items:center; justify-content:center; gap:14px; padding:8px;
+  border-bottom:1px solid var(--line); background:var(--surface); position:sticky; top:0; z-index:1;
+}
+.pdfv-pagelbl{font-size:.8rem; font-weight:600; color:var(--ink-soft); min-width:110px; text-align:center;}
+.pdfv-canvas-wrap{overflow:auto; max-height:75vh; display:flex; justify-content:center; padding:10px; background:var(--paper);}
+.pdfv-canvas-wrap canvas{max-width:100%; box-shadow:var(--shadow-sm);}
 .name-search{display:flex; flex-direction:column; gap:6px; margin-bottom:12px;}
 .name-search label{font-size:.72rem; font-weight:600; color:var(--ink-soft);}
 .name-search input{max-width:300px;}
@@ -229,7 +236,7 @@ mark, .nm-detalle mark{
 .ch-label{font-size:.7rem; font-weight:600; color:var(--ink-soft); display:block; margin-bottom:7px; text-transform:uppercase; letter-spacing:.04em;}
 .ch-list{display:flex; gap:8px; overflow-x:auto; padding-bottom:4px;}
 .ch-item{
-  flex-shrink:0; border-radius:12px; padding:9px 26px 9px 11px; cursor:pointer;
+  flex-shrink:0; border-radius:12px; padding:9px 40px 9px 11px; cursor:pointer;
   display:flex; flex-direction:column; gap:2px; position:relative; min-width:132px;
   box-shadow:var(--shadow-sm);
 }
@@ -243,10 +250,19 @@ mark, .nm-detalle mark{
 .ch-tipo.is-es{color:var(--teal); background:color-mix(in srgb, var(--teal) 15%, var(--surface));}
 .ch-tipo.is-fs{color:var(--sand-dark); background:color-mix(in srgb, var(--sand) 18%, var(--surface));}
 .ch-meses{font-size:.76rem; font-weight:600; text-transform:capitalize;}
+.ch-nombre{font-size:.72rem; color:var(--ink-soft); font-weight:600;}
 .ch-del{position:absolute; top:4px; right:4px; background:none; border:none; cursor:pointer; font-size:.78rem; opacity:.4; padding:2px;}
-.ch-del:hover{opacity:1;}
+.ch-edit{position:absolute; top:4px; right:20px; background:none; border:none; cursor:pointer; font-size:.72rem; opacity:.4; padding:2px;}
+.ch-del:hover, .ch-edit:hover{opacity:1;}
 .ch-dest{font-size:.74rem; color:var(--ink-soft); margin-top:8px; display:flex; gap:6px; align-items:center; flex-wrap:wrap;}
 .ch-dest strong{color:var(--ink);}
+
+/* ---------- Búsqueda de asignaciones (pestaña Asignaciones) ---------- */
+.asg-search{margin-top:20px; padding-top:16px; border-top:1px solid var(--line);}
+.asg-search h3{font-size:.95rem; margin:0 0 10px;}
+.sc-btn{font-size:.8rem; margin-bottom:10px;}
+.sc-row{display:flex; align-items:center; gap:8px; padding:7px 2px; font-size:.86rem; cursor:pointer;}
+.sc-list{max-height:280px; overflow-y:auto; border-top:1px solid var(--line); margin-top:4px;}
 .ch-chg{background:none; border:1px solid var(--line); border-radius:999px; font-size:.7rem; padding:3px 10px; cursor:pointer; color:var(--teal);}
 .ch-chg:hover{background:var(--paper-2);}
 
@@ -406,6 +422,8 @@ mark, .nm-detalle mark{
 .tk-chip.active{background:var(--sand-dark); color:#fff; border-color:var(--sand-dark);}
 
 .tk-list{display:flex; flex-direction:column; gap:8px;}
+.tk-list[hidden]{display:none;}
+.ev-recur{opacity:.6; font-size:.85em;}
 .tk-group{margin-bottom:6px;}
 .tk-group-h{
   font-family:var(--font-body); font-size:.72rem; font-weight:700; text-transform:uppercase;
@@ -505,6 +523,7 @@ mark, .nm-detalle mark{
 
 /* ---------- Proyectos ---------- */
 .proyectos-list{display:flex; flex-direction:column; gap:12px;}
+.proyectos-list[hidden]{display:none;}
 .proyecto-card{padding:14px 16px;}
 .proyecto-card h3{font-size:1.02rem;}
 .proyecto-card .fecha{font-family:var(--font-mono); font-size:.72rem; color:var(--ink-soft); margin:2px 0 10px;}
@@ -555,9 +574,11 @@ mark, .nm-detalle mark{
 
 /* ---------- Menú hamburguesa (móvil) ---------- */
 .hamburger{
-  background:none; border:none; color:#fff; font-size:1.4rem; cursor:pointer;
-  padding:2px 8px 2px 0; line-height:1; display:none;
+  background:none; border:none; color:#fff; cursor:pointer;
+  padding:2px 10px 2px 0; line-height:0; display:none;
+  align-items:center; justify-content:center;
 }
+.hamburger svg{width:24px; height:24px; display:block;}
 .theme-toggle{font-size:1.1rem; color:#EDEFF2; padding:4px 6px;}
 .theme-toggle:hover{background:rgba(255,255,255,.12); color:#fff;}
 .nav-drawer{position:fixed; inset:0; background:rgba(10,14,20,.5); z-index:60; display:flex;}
@@ -582,6 +603,11 @@ mark, .nm-detalle mark{
   .hamburger{display:inline-flex;}
   main{padding-top:16px;}
 }
+
+/* En la APK (Capacitor) usa siempre la navegación de móvil, sea cual sea el ancho */
+html.is-app .tabs{display:none;}
+html.is-app .hamburger{display:inline-flex;}
+html.is-app main{padding-top:16px;}
 
 /* ---------- Guardar / descartar asignación ---------- */
 .digital-row{padding-right:52px;}
