@@ -1,0 +1,33 @@
+diff --git a/node_modules/@codetrix-studio/capacitor-google-auth/android/src/main/java/com/codetrixstudio/capacitor/GoogleAuth/GoogleAuth.java b/node_modules/@codetrix-studio/capacitor-google-auth/android/src/main/java/com/codetrixstudio/capacitor/GoogleAuth/GoogleAuth.java
+index 147fac8..ad29439 100644
+--- a/node_modules/@codetrix-studio/capacitor-google-auth/android/src/main/java/com/codetrixstudio/capacitor/GoogleAuth/GoogleAuth.java
++++ b/node_modules/@codetrix-studio/capacitor-google-auth/android/src/main/java/com/codetrixstudio/capacitor/GoogleAuth/GoogleAuth.java
+@@ -53,7 +53,19 @@ public class GoogleAuth extends Plugin {
+ 
+   private GoogleSignInClient googleSignInClient;
+ 
++  // Extra OAuth scopes requested via initialize(); appended to the access-token request
++  // so the returned accessToken actually works against Drive / Calendar REST APIs.
++  private String oauthScopeString = "oauth2:profile email";
++
+   public void loadSignInClient (String clientId, boolean forceCodeForRefreshToken, String[] scopeArray) {
++    StringBuilder sb = new StringBuilder("oauth2:profile email");
++    if (scopeArray != null) {
++      for (String s : scopeArray) {
++        if (s != null && s.trim().length() > 0) sb.append(' ').append(s.trim());
++      }
++    }
++    this.oauthScopeString = sb.toString();
++
+     GoogleSignInOptions.Builder googleSignInBuilder = new GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+       .requestIdToken(clientId)
+       .requestEmail();
+@@ -203,7 +215,7 @@ public class GoogleAuth extends Plugin {
+   // Logic to retrieve accessToken, see https://github.com/EddyVerbruggen/cordova-plugin-googleplus/blob/master/src/android/GooglePlus.java
+   private JSONObject getAuthToken(Account account, boolean retry) throws Exception {
+     AccountManager manager = AccountManager.get(getContext());
+-    AccountManagerFuture<Bundle> future = manager.getAuthToken(account, "oauth2:profile email", null, false, null, null);
++    AccountManagerFuture<Bundle> future = manager.getAuthToken(account, this.oauthScopeString, null, false, null, null);
+     Bundle bundle = future.getResult();
+     String authToken = bundle.getString(AccountManager.KEY_AUTHTOKEN);
+     try {
